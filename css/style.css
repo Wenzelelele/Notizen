@@ -215,6 +215,9 @@ svg { display: block; }
 .size { width: 36px; height: 36px; flex: none; display: grid; place-items: center; border: 0; border-radius: 8px; background: transparent; cursor: pointer; }
 .size.on { background: var(--accent-soft); color: var(--accent); }
 .size i { display: block; border-radius: 50%; box-shadow: 0 0 0 1px rgba(127, 127, 127, .55); }
+.mode { height: 36px; padding: 0 10px; flex: none; border: 0; border-radius: 8px; background: transparent; color: inherit; font: inherit; font-size: 14px; white-space: nowrap; cursor: pointer; }
+.mode:hover { background: var(--panel2); }
+.mode.on { background: var(--accent-soft); color: var(--accent); }
 
 .stage { position: relative; flex: 1; min-height: 0; min-width: 0; background: var(--desk); }
 /* Notiz + Kartenfenster: hochkant unten, quer rechts daneben – die Folie bleibt beim Schreiben sichtbar */

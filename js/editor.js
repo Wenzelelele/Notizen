@@ -22,7 +22,7 @@ const HOLD_MS = 480;
 const S = loadSettings();
 let lastDrawTool = S.tool === 'hl' ? 'hl' : 'pen'; // Ziel beim Zurückwechseln vom Radierer
 function loadSettings() {
-  const d = { tool: 'pen', penColor: PEN_COLORS[0], hlColor: HL_COLORS[0], size: { pen: 1, hl: 1, eraser: 1, text: 0 }, shapeMode: false, fingerDraw: false };
+  const d = { tool: 'pen', penColor: PEN_COLORS[0], hlColor: HL_COLORS[0], size: { pen: 1, hl: 1, eraser: 1, text: 0 }, shapeMode: false, fingerDraw: false, eraserMode: 'stroke' };
   try {
     const s = JSON.parse(localStorage.getItem('notizen.editor') || '{}');
     return { ...d, ...s, size: { ...d.size, ...(s.size || {}) } };
@@ -115,6 +115,9 @@ export async function openEditor(root, nbId, embed = null) {
         h('label', { class: 'swatch custom' + (list.includes(cur) ? '' : ' on'), title: 'Eigene Farbe' },
           h('input', { type: 'color', value: cur, onchange: e => setColor(e.target.value) })));
     }
+    if (t === 'eraser') kids.push(vsep(), h('div', { class: 'seg' },
+      [['stroke', 'Ganze Striche', 'Löscht jeden berührten Strich ganz'], ['part', 'Teilweise', 'Entfernt nur, was du überfährst – wie ein echter Radierer']]
+        .map(([m, label, title]) => h('button', { class: 'mode' + (S.eraserMode === m ? ' on' : ''), title, onclick: () => setEraserMode(m) }, label))));
     if (SIZES[t]) kids.push(vsep(), ...SIZES[t].map((_, i) =>
       h('button', { class: 'size' + (S.size[t] === i ? ' on' : ''), title: 'Größe ' + (i + 1), onclick: () => { S.size[t] = i; saveSettings(); renderTools(); } }, dotFor(t, i))));
     kids.push(h('div', { class: 'grow' }),
@@ -130,6 +133,10 @@ export async function openEditor(root, nbId, embed = null) {
     saveSettings();
     renderTools();
     toolEvents.dispatchEvent(new Event('change'));
+  }
+  function setEraserMode(m) {
+    S.eraserMode = m; saveSettings(); renderTools();
+    toast(m === 'part' ? 'Radierer entfernt nur, was du überfährst' : 'Radierer löscht ganze Striche');
   }
   function setColor(c) { if (S.tool === 'hl') S.hlColor = c; else S.penColor = c; saveSettings(); renderTools(); toolEvents.dispatchEvent(new Event('change')); }
   const onToolChange = () => renderTools();
@@ -293,7 +300,9 @@ export async function openEditor(root, nbId, embed = null) {
   }
   function paintPreview(pv) {
     const p = pv.page, ps = Math.min(0.5, Math.sqrt(1.2e6 / (p.w * p.h)));
-    if (bare(p) && !p.strokes.length) { freePreview(pv); pv.prevFresh = true; return; } // nichts außer Bildern
+    // Blanke Seite (weiß/PDF): Dort sind die Kacheln durchsichtig – eine grobe Vorschau darunter schiene als
+    // unscharfer Rand um jeden Strich durch. Bilder zeigt ohnehin der Browser, reine Handschrift-Kacheln sind schnell gezeichnet.
+    if (bare(p)) { freePreview(pv); pv.prevFresh = true; return; }
     if (!pv.prev) {
       pv.prev = h('canvas', { class: 'tile preview', width: 0, height: 0 });
       pv.tilesEl.prepend(pv.prev); // ganz unten, unter allen Kacheln
@@ -302,8 +311,7 @@ export async function openEditor(root, nbId, embed = null) {
     if (c.width !== W || c.height !== H) { c.width = W; c.height = H; }
     const ctx = c.getContext('2d'), r = { x0: 0, y0: 0, x1: p.w, y1: p.h };
     ctx.setTransform(ps, 0, 0, ps, 0, 0);
-    if (bare(p)) ctx.clearRect(0, 0, p.w, p.h);
-    else ink.drawBackground(ctx, p, null, 0, p.h);
+    ink.drawBackground(ctx, p, null, 0, p.h);
     ink.drawInk(ctx, p.strokes, null, r, ps);
     pv.prevFresh = true;
     placePreview(pv);
@@ -359,7 +367,7 @@ export async function openEditor(root, nbId, embed = null) {
     const { pv } = t, ctx = tileCtx(t), r = { x0: t.x0, y0: t.y0, x1: t.x1 + t.pad, y1: t.y1 + t.pad };
     if (bare(pv.page)) ctx.clearRect(r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0); // PDF-Seite/Folien liegen als Bilder darunter
     else ink.drawBackground(ctx, pv.page, null, r.y0, r.y1);
-    ink.drawInk(ctx, pv.page.strokes, hide, r, t.bs);
+    ink.drawInk(ctx, pv.page.strokes, hide, r, t.bs, pv.extra);
   }
   // „Blanke“ Seite: PDF-Hintergrund oder weißes Blanko-Papier – dann zeichnen die Kacheln nur Handschrift,
   // alles andere (weiße Seite, PDF, Folien) zeigt der Browser selbst und skaliert es auf der Grafikkarte.
@@ -684,7 +692,7 @@ export async function openEditor(root, nbId, embed = null) {
     clearTimeout(E.holdT);
     E.cur = null;
     A.box?.remove();
-    if (A.tool === 'eraser' && A.changed) redraw(A.pv); // ausgeblendete Striche wieder zeigen
+    if (A.tool === 'eraser' && A.changed) { A.pv.extra = null; redraw(A.pv); } // ausgeblendete Striche wieder zeigen
     if (A.drag) { dragVisual(0, 0); redraw(A.pv); }
     E.act = null;
     requestLive();
@@ -756,15 +764,19 @@ export async function openEditor(root, nbId, embed = null) {
     } else redraw(pv, null, b);
   }
 
-  // Radierer (löscht ganze Striche)
+  // Radierer: „Ganze Striche“ löscht jeden berührten Strich, „Teilweise“ nur das Stück unter dem Radierer
   const eraserR = () => SIZES.eraser[S.size.eraser];
   // Während des Radierens werden getroffene Striche nur ausgeblendet (A.removed); erst beim Absetzen
   // entsteht das neue Strich-Array. So muss der räumliche Index nicht bei jedem Treffer neu aufgebaut werden.
+  // Beim teilweisen Radieren stehen die Reste so lange in A.groups (Original-ID → Stücke) und pv.extra.
   function eraseDown(pt) {
     const A = E.act;
     A.before = snap(A.pv.page);
     A.base = A.pv.page.strokes;
     A.removed = new Set();
+    A.part = S.eraserMode === 'part';
+    A.groups = new Map();
+    A.owner = new Map(); // Reststück → ID des Original-Strichs
     A.changed = false;
     eraseAt(pt);
   }
@@ -782,20 +794,49 @@ export async function openEditor(root, nbId, embed = null) {
     // nur Striche in der Nähe prüfen (räumlicher Index, siehe ink.js)
     const near = ink.strokesIn(A.base, { x0: pt.x - r, y0: pt.y - r, x1: pt.x + r, y1: pt.y + r });
     const join = (b, c) => (b ? { x: Math.min(b.x, c.x), y: Math.min(b.y, c.y), w: Math.max(b.x + b.w, c.x + c.w) - Math.min(b.x, c.x), h: Math.max(b.y + b.h, c.y + c.h) - Math.min(b.y, c.y) } : c);
-    for (const s of near) {
-      if (A.removed.has(s.id) || !ink.hitStroke(s, pt.x, pt.y, r)) continue;
-      A.removed.add(s.id);
-      // nur die Kacheln unter den gelöschten Strichen neu zeichnen
+    // nur die Kacheln unter den getroffenen Strichen neu zeichnen
+    const touched = s => {
       const sb = ink.strokeBBox(s);
       A.dirtyBox = join(A.dirtyBox, sb); // bis zum nächsten Frame
       A.eraseBox = join(A.eraseBox, sb); // ganze Geste
       A.changed = A.needRedraw = true;
+    };
+    if (A.part) { erasePart(pt, r, near, touched); return; }
+    for (const s of near) {
+      if (A.removed.has(s.id) || !ink.hitStroke(s, pt.x, pt.y, r)) continue;
+      A.removed.add(s.id);
+      touched(s);
     }
+  }
+  function erasePart(pt, r, near, touched) {
+    const A = E.act;
+    let cut = false;
+    for (const s of near.filter(s => !A.removed.has(s.id)).concat([...A.owner.keys()])) {
+      const rest = ink.cutStroke(s, pt.x, pt.y, r);
+      if (!rest) continue;
+      const pieces = rest.map(pts => ({ ...s, id: uid(), pts }));
+      const orig = A.owner.get(s);
+      if (orig) { // Reststück wird weiter zerschnitten
+        const g = A.groups.get(orig);
+        g.splice(g.indexOf(s), 1, ...pieces);
+        A.owner.delete(s);
+        for (const p of pieces) A.owner.set(p, orig);
+      } else {
+        A.removed.add(s.id);
+        A.groups.set(s.id, pieces);
+        for (const p of pieces) A.owner.set(p, s.id);
+      }
+      touched(s);
+      cut = true;
+    }
+    if (cut) A.pv.extra = [...A.groups.values()].flat();
   }
   function eraseUp() {
     const A = E.act;
+    A.pv.extra = null;
     if (!A.changed) return;
-    A.pv.page.strokes = A.base.filter(s => !A.removed.has(s.id));
+    // Reste an die Stelle des Originals (die Reihenfolge bestimmt, was oben liegt)
+    A.pv.page.strokes = A.base.flatMap(s => (A.removed.has(s.id) ? A.groups.get(s.id) || [] : [s]));
     redraw(A.pv, null, A.eraseBox);
     commit(A.pv, A.before);
   }
@@ -1342,6 +1383,7 @@ export async function openEditor(root, nbId, embed = null) {
         li('Apple Pencil', 'schreibt; der Finger scrollt, zwei Finger zoomen. Die Handfläche wird ignoriert.'),
         li('Karteikarte aus Bereich', 'Werkzeug mit dem Rahmen-Symbol: Rahmen um einen Teil der Folie ziehen → wird Antwort oder Frage einer neuen Karte.'),
         li('Doppeltipp mit dem Finger','wechselt zwischen Stift und Radierer (der Doppeltipp auf den Pencil selbst geht in Web-Apps leider nicht).'),
+        li('Radierer', '„Ganze Striche“ löscht jeden berührten Strich auf einmal, „Teilweise“ entfernt nur, was du überfährst – wie ein echter Radierer.'),
         li('Stift halten', 'am Ende eines Strichs kurz stillhalten → wird zur geraden Linie, zum Kreis, Rechteck oder Dreieck. Bei Linien kannst du danach den Endpunkt noch verschieben.'),
         li('Formen-Schalter', 'jede gezeichnete Form wird automatisch begradigt.'),
         li('Lasso', 'Inhalt umkreisen → verschieben, löschen, duplizieren, umfärben oder kopieren.'),

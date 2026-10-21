@@ -143,8 +143,10 @@ export function drawStroke(ctx, s, dx = 0, dy = 0, px = 1) {
 
 // Marker zuerst, damit Stiftschrift nie vom Marker überdeckt wird.
 // r: nur Striche zeichnen, die dieses Rechteck berühren (Kachel einer großen Seite).
-export function drawInk(ctx, strokes, hide, r, px = 1) {
-  const list = r ? strokesIn(strokes, r) : strokes;
+// extra: zusätzliche Striche, die (noch) nicht in der Seite stehen – die Reste beim teilweisen Radieren.
+export function drawInk(ctx, strokes, hide, r, px = 1, extra = null) {
+  let list = r ? strokesIn(strokes, r) : strokes;
+  if (extra?.length) list = list.concat(extra);
   const vis = s => {
     if (hide?.has(s.id)) return false;
     if (!r) return true;
@@ -277,6 +279,47 @@ export function hitStroke(s, x, y, r) {
     if (distSeg(x, y, a[i - 3], a[i - 2], a[i], a[i + 1]) <= rr) return true;
   }
   return false;
+}
+
+// Radierer „Teilweise“: die Teile des Strichs außerhalb des Radierkreises (Mitte cx/cy, Radius r).
+// Weggenommen wird die Mittellinie bis r + halbe Strichbreite – so endet die runde Kante der Reste genau am
+// Kreisrand, und die Lücke ist so breit wie die Radierspur. null: nicht berührt; sonst die übrigen Stücke
+// als Punktlisten (leere Liste: Strich ganz weg).
+export function cutStroke(s, cx, cy, r) {
+  const a = s.pts, n = a.length / 3, uniform = s.tool === 'hl' || s.shape;
+  const reach = p => r + (uniform ? s.size : s.size * pw(p)) / 2;
+  const b = strokeBBox(s);
+  if (cx < b.x - r || cx > b.x + b.w + r || cy < b.y - r || cy > b.y + b.h + r) return null;
+  if (n === 1) return Math.hypot(a[0] - cx, a[1] - cy) <= reach(a[2]) ? [] : null;
+  const out = [];
+  let cur = null, hit = false;
+  const add = (x, y, p) => { if (!cur) out.push(cur = []); cur.push(r2(x), r2(y), r2(p)); };
+  if (Math.hypot(a[0] - cx, a[1] - cy) > reach(a[2])) add(a[0], a[1], a[2]); else hit = true;
+  for (let i = 3; i < a.length; i += 3) {
+    const ax = a[i - 3], ay = a[i - 2], ap = a[i - 1], bx = a[i], by = a[i + 1], bp = a[i + 2];
+    const dx = bx - ax, dy = by - ay, fx = ax - cx, fy = ay - cy, R = reach((ap + bp) / 2);
+    // Strecke A→B schneidet den Kreis für t zwischen lo und hi (|F + t·D| = R)
+    const qa = dx * dx + dy * dy, qb = fx * dx + fy * dy, qc = fx * fx + fy * fy - R * R;
+    let lo = 1, hi = 0;
+    if (!qa) { if (qc <= 0) { lo = 0; hi = 1; } }
+    else if (qb * qb - qa * qc > 0) {
+      const sq = Math.sqrt(qb * qb - qa * qc);
+      lo = Math.max(0, (-qb - sq) / qa);
+      hi = Math.min(1, (-qb + sq) / qa);
+    }
+    if (lo >= hi) { if (!cur) add(ax, ay, ap); add(bx, by, bp); continue; } // ganz außerhalb
+    hit = true;
+    if (lo > 0) add(ax + dx * lo, ay + dy * lo, ap + (bp - ap) * lo);
+    cur = null;
+    if (hi < 1) { add(ax + dx * hi, ay + dy * hi, ap + (bp - ap) * hi); add(bx, by, bp); }
+  }
+  if (!hit) return null;
+  return out.filter(P => P.length >= 6 && polyLen(P) >= 0.5); // Krümel fallen weg
+}
+function polyLen(P) {
+  let l = 0;
+  for (let i = 3; i < P.length; i += 3) l += Math.hypot(P[i] - P[i - 3], P[i + 1] - P[i - 2]);
+  return l;
 }
 
 // poly: flaches Array [x, y, x, y, …]
