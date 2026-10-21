@@ -48,7 +48,8 @@ if ('serviceWorker' in navigator && location.protocol === 'https:') {
     updateReady = true;
     if (!busy()) applyUpdate();
   });
-  navigator.serviceWorker.register('sw.js').then(reg => {
+  // updateViaCache: sw.js selbst nie aus dem Browser-Cache prüfen, sonst merkt das iPad Updates erst Minuten später
+  navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(reg => {
     // iPad: Die App wird oft nur aus dem Hintergrund geholt statt neu gestartet – dann auch nach Updates schauen
     document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') reg.update().catch(() => {}); });
   }).catch(() => {});
