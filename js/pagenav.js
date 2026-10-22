@@ -42,7 +42,7 @@ async function thumbUrl(page) {
   return url;
 }
 
-// api: { body, stage, scroller, pages(), current(), jump(i), busy() }
+// api: { body, stage, scroller, pages(), current(), jump(i), busy(), touch(e), pen(e), grabbed() }
 export function createPageNav(api) {
   // ---------- Scroll-Leiste ----------
   const knob = h('div', { class: 'scrub-knob' });
@@ -69,22 +69,59 @@ export function createPageNav(api) {
     bubble.style.transform = `translateY(${Math.round(f * track)}px)`;
     label();
   }
+  // Die Maus zieht sofort. Ein Finger muss den Griff kurz festhalten (wie bei iOS): Ein normaler Wisch, der
+  // zufällig am rechten Rand auf dem Griff beginnt, scrollt wie überall – vorher sprang die Notiz dabei um viele
+  // Seiten. Der Pencil schreibt auf der Seite darunter weiter.
+  const HOLD_MS = 250;
+  let hold = null; // Finger liegt auf dem Griff, noch nicht gegriffen
+  function grab(id, y) {
+    dragging = { id, grab: y - knob.getBoundingClientRect().top };
+    scrub.classList.add('drag');
+    clearTimeout(hideT);
+  }
   knob.addEventListener('pointerdown', e => {
+    if (e.pointerType === 'pen') { api.pen?.(e); return; }
     e.preventDefault();
     e.stopPropagation();
     try { knob.setPointerCapture(e.pointerId); } catch { /* egal */ }
-    dragging = { id: e.pointerId, grab: e.clientY - knob.getBoundingClientRect().top };
-    scrub.classList.add('drag');
-    clearTimeout(hideT);
+    if (e.pointerType !== 'touch') { grab(e.pointerId, e.clientY); return; }
+    clearTimeout(hold?.timer);
+    const h0 = { id: e.pointerId, x: e.clientX, y: e.clientY };
+    h0.timer = setTimeout(() => {
+      if (hold !== h0) return;
+      hold = null;
+      api.grabbed?.(); // begonnenes Wischen abbrechen
+      grab(h0.id, h0.y);
+      const track = scrub.clientHeight - knob.offsetHeight;
+      bubble.style.transform = `translateY(${Math.round((api.scroller.scrollTop / range()) * track)}px)`;
+      label();
+    }, HOLD_MS);
+    hold = h0;
   });
-  knob.addEventListener('pointermove', e => { if (dragging?.id === e.pointerId) scrubTo(e.clientY); });
+  knob.addEventListener('pointermove', e => {
+    if (hold?.id === e.pointerId && Math.hypot(e.clientX - hold.x, e.clientY - hold.y) > 8) { clearTimeout(hold.timer); hold = null; } // gewischt
+    if (dragging?.id === e.pointerId) scrubTo(e.clientY);
+  });
+  // Finger-Ereignisse auf dem Griff steuern die Notiz wie überall (wischen, zoomen) – außer der Griff ist gepackt
+  for (const t of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) {
+    knob.addEventListener(t, e => { if (dragging) { if (e.cancelable) e.preventDefault(); } else api.touch?.(e); }, { passive: false });
+  }
   const end = e => {
+    if (hold?.id === e.pointerId) { clearTimeout(hold.timer); hold = null; }
     if (dragging?.id !== e.pointerId) return;
     dragging = null;
     hideT = setTimeout(() => scrub.classList.remove('drag'), 600);
   };
   knob.addEventListener('pointerup', end);
   knob.addEventListener('pointercancel', end);
+  // App verlassen, während der Griff gepackt ist: „Finger hoch“ kommt dann nie an – loslassen
+  const onVis = () => {
+    if (document.visibilityState !== 'hidden') return;
+    clearTimeout(hold?.timer);
+    hold = dragging = null;
+    scrub.classList.remove('drag');
+  };
+  document.addEventListener('visibilitychange', onVis);
 
   // ---------- Seitenübersicht ----------
   const list = h('div', { class: 'thumbs-list' });
@@ -168,6 +205,8 @@ export function createPageNav(api) {
     destroy() {
       clearTimeout(queueT);
       clearTimeout(hideT);
+      clearTimeout(hold?.timer);
+      document.removeEventListener('visibilitychange', onVis);
       rafQ?.();
       open = false;
       for (const m of mem.values()) URL.revokeObjectURL(m.url);

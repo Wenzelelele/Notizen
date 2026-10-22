@@ -226,8 +226,9 @@ export async function openEditor(root, nbId, embed = null) {
     const sr = scroller.getBoundingClientRect(), s = E.scale * E.k;
     const A = [sr.left - 200, sr.top - 350, sr.right + 200, sr.bottom + 350]; // hier zeichnen
     const B = [sr.left - 500, sr.top - 650, sr.right + 500, sr.bottom + 650]; // erst außerhalb davon freigeben
-    for (const pv of E.pvs.values()) {
-      const r = pv.el.getBoundingClientRect();
+    const pvs = [...E.pvs.values()], rects = pvs.map(pv => pv.el.getBoundingClientRect()); // erst lesen, dann ändern
+    for (const [i, pv] of pvs.entries()) {
+      const r = rects[i];
       const wa = tileRange(pv, r, s, A), wb = tileRange(pv, r, s, B);
       for (const t of pv.active) {
         if (inRange(wa, t)) continue;
@@ -507,12 +508,14 @@ export async function openEditor(root, nbId, embed = null) {
     pagesEl.style.gap = gap + 'px';
     pagesEl.classList.toggle('tight', gap < 22); // dann ist kein Platz für „Seite N“
     for (const pv of E.pvs.values()) sizePV(pv);
-    const d = dpr(), frac = v => ((v * d) % 1 + 1) % 1;
-    for (const pv of E.pvs.values()) { // Versatz der Seite zum Pixelraster (z. B. durch Zentrieren)
-      const r = pv.el.getBoundingClientRect();
-      pv.off = { x: frac(r.left), y: frac(r.top) };
+    const d = dpr(), frac = v => ((v * d) % 1 + 1) % 1, pvs = [...E.pvs.values()];
+    // Versatz der Seiten zum Pixelraster (z. B. durch Zentrieren). Erst alle Positionen lesen, dann schreiben:
+    // abwechselnd hätte der Browser bei langen Skripten für jede Seite das ganze Layout neu berechnet.
+    const rects = pvs.map(pv => pv.el.getBoundingClientRect());
+    pvs.forEach((pv, i) => {
+      pv.off = { x: frac(rects[i].left), y: frac(rects[i].top) };
       layoutPV(pv);
-    }
+    });
     zoomLabel.textContent = Math.round(E.scale * 100) + '%'; // 100 % = Originalgröße
     if (E.sel) positionSel();
     refreshTiles();
@@ -641,7 +644,8 @@ export async function openEditor(root, nbId, embed = null) {
       if (e.pointerType === 'touch') return; // Finger während eines Stiftstrichs ignorieren
       finishLost();
     }
-    const el = e.target.closest('.page');
+    // Pencil auf dem Scroll-Griff (liegt über dem rechten Seitenrand): schreibt auf der Seite darunter
+    const el = e.target.closest('.page') || (e.target.closest('.scrub') && document.elementsFromPoint(e.clientX, e.clientY).find(x => x.classList.contains('page')));
     if (!el || e.target.closest('.page-btn, .selmenu, .text-edit')) return;
     if (e.pointerType === 'touch' && !S.fingerDraw) return; // Finger scrollt
     if (e.pointerType === 'mouse' && e.button !== 0) return;
@@ -1383,7 +1387,8 @@ export async function openEditor(root, nbId, embed = null) {
         li('Apple Pencil', 'schreibt; der Finger scrollt, zwei Finger zoomen. Die Handfläche wird ignoriert.'),
         li('Karteikarte aus Bereich', 'Werkzeug mit dem Rahmen-Symbol: Rahmen um einen Teil der Folie ziehen → wird Antwort oder Frage einer neuen Karte.'),
         li('Doppeltipp mit dem Finger','wechselt zwischen Stift und Radierer (der Doppeltipp auf den Pencil selbst geht in Web-Apps leider nicht).'),
-        li('Radierer', '„Ganze Striche“ löscht jeden berührten Strich auf einmal, „Teilweise“ entfernt nur, was du überfährst – wie ein echter Radierer.'),
+        li('Scroll-Leiste', 'Griff am rechten Rand kurz festhalten, dann ziehen – springt schnell durch lange Skripte. Einfach drüberwischen scrollt normal.'),
+        li('Radierer','„Ganze Striche“ löscht jeden berührten Strich auf einmal, „Teilweise“ entfernt nur, was du überfährst – wie ein echter Radierer.'),
         li('Stift halten', 'am Ende eines Strichs kurz stillhalten → wird zur geraden Linie, zum Kreis, Rechteck oder Dreieck. Bei Linien kannst du danach den Endpunkt noch verschieben.'),
         li('Formen-Schalter', 'jede gezeichnete Form wird automatisch begradigt.'),
         li('Lasso', 'Inhalt umkreisen → verschieben, löschen, duplizieren, umfärben oder kopieren.'),
@@ -1405,13 +1410,20 @@ export async function openEditor(root, nbId, embed = null) {
   const UI_SEL = 'button, input, textarea, select, label, .selmenu';
   let gest = null, inertia = 0;
   function stopInertia() { if (inertia) cancelAnimationFrame(inertia); inertia = 0; }
-  function startInertia(samples) {
-    const now = performance.now(), recent = samples.filter(s => now - s.t < 120);
-    if (recent.length < 2) return;
-    const dt = Math.max(16, recent[recent.length - 1].t - recent[0].t);
+  // Schwung nach dem Loslassen. Zeiten sind die der Touch-Ereignisse selbst: Hängt die App kurz, kommen die
+  // Bewegungen danach gebündelt an – mit der Verarbeitungszeit sähe das wie ein extrem schneller Wisch aus,
+  // und die Notiz flog seitenweise davon. Zusätzlich begrenzt auf 4 px/ms (schneller wischt kaum jemand).
+  const MAX_FLING = 4;
+  function startInertia(samples, end) {
+    const recent = samples.filter(s => end - s.t < 100);
+    if (recent.length < 2 || end - recent[recent.length - 1].t > 50) return; // Finger lag zuletzt still: kein Schwung
+    if (recent.length >= 3 && end - recent[0].t < 8) return; // alles im selben Augenblick angekommen: Tempo unbekannt
+    const dt = Math.max(40, end - recent[0].t);
     let vx = recent.reduce((a, s) => a + s.dx, 0) / dt, vy = recent.reduce((a, s) => a + s.dy, 0) / dt;
-    if (Math.hypot(vx, vy) < 0.15) return; // px pro ms
-    let last = now;
+    const v = Math.hypot(vx, vy);
+    if (v < 0.15) return; // px pro ms
+    if (v > MAX_FLING) { vx *= MAX_FLING / v; vy *= MAX_FLING / v; }
+    let last = performance.now();
     const step = t => {
       const d = Math.min(50, t - last);
       last = t;
@@ -1516,7 +1528,8 @@ export async function openEditor(root, nbId, embed = null) {
     } else if (f.length === 1 && !S.fingerDraw) {
       const t = f[0];
       if (!gest || gest.mode !== 'pan' || gest.id !== t.identifier) {
-        gest = { mode: 'pan', id: t.identifier, x: t.clientX, y: t.clientY, samples: [] };
+        // Rest einer Zoom-Geste (ein Finger schon oben): verschiebt noch, gibt beim Loslassen aber keinen Schwung
+        gest = { mode: 'pan', id: t.identifier, x: t.clientX, y: t.clientY, samples: [], afterPinch: gest?.mode === 'pinch' };
         return;
       }
       const dx = t.clientX - gest.x, dy = t.clientY - gest.y;
@@ -1524,10 +1537,10 @@ export async function openEditor(root, nbId, embed = null) {
       gest.y = t.clientY;
       scroller.scrollLeft -= dx;
       scroller.scrollTop -= dy;
-      gest.samples.push({ t: performance.now(), dx, dy });
-      if (gest.samples.length > 8) gest.samples.shift();
+      gest.samples.push({ t: e.timeStamp, dx, dy });
+      if (gest.samples.length > 12) gest.samples.shift();
     } else {
-      if (gest?.mode === 'pan' && e.type === 'touchend') startInertia(gest.samples);
+      if (gest?.mode === 'pan' && !gest.afterPinch && e.type === 'touchend') startInertia(gest.samples, e.timeStamp);
       gest = null;
     }
   }
@@ -1626,7 +1639,9 @@ export async function openEditor(root, nbId, embed = null) {
   if (view) { scroller.scrollLeft = view.x * E.scale; scroller.scrollTop = view.y * E.scale; }
   updateVisible();
   if (!card && !embed) {
-    nav = createPageNav({ body: mainRow, stage, scroller, pages: () => E.pages, current: currentIndex, jump: jumpTo, busy: () => !!(gest || inertia || E.act) });
+    nav = createPageNav({ body: mainRow, stage, scroller, pages: () => E.pages, current: currentIndex, jump: jumpTo, busy: () => !!(gest || inertia || E.act),
+      // Scroll-Griff: Finger wischen dort wie überall, der Pencil schreibt auf der Seite darunter
+      touch: onTouch, pen: onDown, grabbed: () => { if (gest?.mode === 'pan') gest = null; stopInertia(); } });
     nav.setOpen(!!S.thumbs);
   }
   renumber();

@@ -1,5 +1,5 @@
 // App-Version: build-web.js setzt beim Veröffentlichen den Zeitpunkt ein (am PC bleibt es 'dev')
-export const BUILD = '2026-10-21T13:31:24.900Z';
+export const BUILD = '2026-10-22T09:11:57.474Z';
 
 export function versionLabel() {
   const d = new Date(BUILD);
