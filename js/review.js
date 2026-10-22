@@ -65,7 +65,7 @@ export async function showReview(root, folderId) {
     if (current.occl) current.__bmp = await loadOcclusionImage(current.occl);
     const pages = current.occl ? [] : await store.pagesOf(current);
     const front = current.occl ? await occlSide(current, false) : pages[0] ? await side(pages[0]) : h('p', {}, '(leer)');
-    if (!alive) return;
+    if (!alive) { current.__bmp?.close?.(); delete current.__bmp; return; } // Lernmodus inzwischen verlassen
     const src = current.source?.noteId;
     cardEl.replaceChildren(h('div', { class: 'rv-label' }, current.occl ? 'Was ist hier verdeckt?' : 'Frage'), front);
     footEl.replaceChildren(

@@ -9,7 +9,7 @@ import { cloudConfigured, currentUser } from './cloud.js';
 // Die gerade sichtbare Bibliothek aktualisieren, wenn der Sync etwas geholt hat bzw. sich sein Status ändert
 let active = null;
 syncEvents.addEventListener('received', () => active?.reload());
-syncEvents.addEventListener('status', () => active?.render());
+syncEvents.addEventListener('status', () => active?.status()); // nur den Sync-Knopf, nicht die ganze Bibliothek
 import { TEMPLATES, PAPER_NAMES, drawBackground } from './ink.js';
 import { isCard, createCard, deleteCard, isCardFolder, cardFolderFor, tidyCards } from './cards.js';
 import { fmtInterval, newSrs } from './srs.js';
@@ -82,6 +82,7 @@ export async function showLibrary(root) {
     const notes = notesIn(current).sort(current ? (a, b) => byOrder(a, b) || byDate(a, b) : byDate);
     const flash = cardsIn(current).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
     const learnable = cardsUnder(current), due = dueCount(learnable);
+    syncBtn = syncButton();
     const parts = [
       h('header', { class: 'lib-head' },
         here ? h('button', { class: 'ibtn', title: 'Zurück', 'aria-label': 'Zurück', onclick: () => go(parentOf(here)) }, icon('back')) : null,
@@ -94,7 +95,7 @@ export async function showLibrary(root) {
         cardsHere ? h('button', { class: 'btn primary', onclick: e => newFlashcard(e) }, icon('cardPlus'), h('span', { class: 'hide-sm' }, 'Karteikarte'))
           : h('button', { class: 'ibtn', title: 'Neue Karteikarte', 'aria-label': 'Neue Karteikarte', onclick: e => newFlashcard(e) }, icon('cardPlus')),
         cardsHere ? null : h('button', { class: 'btn primary', onclick: newNotebookDialog }, icon('plus'), h('span', { class: 'hide-sm' }, 'Notiz')),
-        syncButton(),
+        syncBtn,
         h('button', { class: 'ibtn', title: 'Mehr', 'aria-label': 'Mehr', onclick: e => (here ? folderMenu(here, e.currentTarget) : libMenu(e.currentTarget)) }, icon('more')))),
       here ? h('nav', { class: 'crumbs', 'aria-label': 'Ordnerpfad' },
         h('button', { onclick: () => go(null) }, 'Notizen'),
@@ -153,6 +154,13 @@ export async function showLibrary(root) {
           allSubjects ? 'Weniger anzeigen' : `Alle ${subjects.length} Fächer`) : null) : null);
   }
 
+  let syncBtn = null;
+  function updateSyncButton() {
+    if (!syncBtn?.isConnected) return;
+    const b = syncButton();
+    syncBtn.replaceWith(b);
+    syncBtn = b;
+  }
   function syncButton() {
     const st = syncStatus(), cloud = cloudConfigured(), user = cloud && currentUser();
     const title = !cloud ? 'Synchronisieren (über den PC)' : !user ? 'Cloud-Sync: nicht angemeldet'
@@ -634,7 +642,7 @@ export async function showLibrary(root) {
     ]);
   }
 
-  active = { reload, render };
+  active = { reload, render, status: updateSyncButton };
   await reload();
   // PDFs aus dem Teilen-Menü (Kurzbefehl) abholen: gleich, beim Zurückholen der App und jede Minute
   const pollInbox = () => {
@@ -647,5 +655,6 @@ export async function showLibrary(root) {
     clearInterval(inboxT);
     document.removeEventListener('visibilitychange', pollInbox);
     if (active?.reload === reload) active = null;
+    syncBtn = null;
   };
 }

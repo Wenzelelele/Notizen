@@ -1,6 +1,6 @@
 // Offline-Fähigkeit: App-Dateien kommen aus dem Cache und werden im Hintergrund aktualisiert
 // (beim nächsten Öffnen ist dann die neue Version da). Notizen selbst liegen ohnehin im Gerät.
-const CACHE = 'notizen-v1792660317474';
+const CACHE = 'notizen-v1792662401565';
 const SHELL = [
   './', 'index.html', 'manifest.json', 'icon.svg', 'icon-180.png', 'icon-512.png', 'css/style.css',
   'js/main.js', 'js/library.js', 'js/editor.js', 'js/ink.js', 'js/ui.js', 'js/store.js',

@@ -79,8 +79,11 @@ async function doSync(adapter, onProgress) {
   for (const e of [...blobs, ...recs]) {
     let data = null, op = e.op;
     if (e.kind !== 'blobs' && op === 'put') { data = await store.get(e.kind, e.id); if (!data) op = 'del'; }
-    batch.push({ change: { kind: e.kind, id: e.id, op, at: e.at, data }, entry: e });
-    size += data ? JSON.stringify(data).length : 100;
+    // nur einmal in Text umwandeln (große Seiten: mehrere MB) – die Cloud lädt genau diesen Text hoch
+    const json = data ? JSON.stringify(data) : null;
+    const change = Object.defineProperty({ kind: e.kind, id: e.id, op, at: e.at, data }, 'json', { value: json });
+    batch.push({ change, entry: e });
+    size += json ? json.length : 100;
     if (e.kind !== 'blobs') onProgress(`Hochladen: Notizen ${++n} von ${recs.length}`, (blobs.length + n) / Math.max(1, box.length));
     if (size > 8e6 || batch.length >= 300) await flush();
   }
@@ -123,8 +126,20 @@ let status = { state: 'idle', text: '' };
 function setStatus(state, text = '') { status = { state, text }; syncEvents.dispatchEvent(new Event('status')); }
 export const syncStatus = () => status;
 
+// Während geschrieben, gewischt oder gezoomt wird, wartet der automatische Abgleich kurz: große Seiten in Text
+// umzuwandeln und zu packen kostet Rechenzeit, die dem Stift fehlen würde. Spätestens nach 3 Minuten läuft er trotzdem.
+let quietUntil = 0, lastAuto = 0, retryT = 0;
+export function userActive(ms = 4000) { quietUntil = Math.max(quietUntil, Date.now() + ms); }
+
 export async function autoSync() {
   if (running || !cloudConfigured() || !currentUser() || !navigator.onLine) return;
+  const now = Date.now();
+  if (now < quietUntil && now - lastAuto < 180000) {
+    clearTimeout(retryT);
+    retryT = setTimeout(autoSync, quietUntil - now + 300);
+    return;
+  }
+  lastAuto = now;
   if ((await store.getMeta('syncTarget')) !== cloudAdapter().target() || !(await store.getMeta('initialQueued'))) return;
   try {
     setStatus('busy');

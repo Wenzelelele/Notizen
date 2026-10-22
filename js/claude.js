@@ -161,6 +161,8 @@ async function renderPreview(id, page) {
     const keep = [];
     let truncated = false;
     for (const t of tiles) {
+      // Notiz geöffnet oder App im Hintergrund: sofort aufhören (eine große Seite hat bis zu 80 Teile) – später weiter
+      if (busyRoute() || document.visibilityState !== 'visible') throw Object.assign(new Error('pausiert'), { pause: true });
       if (!hasContent(page, t)) continue;
       if (keep.length >= MAX_TILES) { truncated = true; break; }
       const c = await renderPage(page, { scale, region: t });
@@ -179,7 +181,7 @@ async function renderPreview(id, page) {
 
 // Im Editor/Lernmodus nicht rendern (sonst ruckelt das Schreiben) – dort geht es danach weiter
 const busyRoute = () => /^#(nb|abdecken|lernen)/.test(location.hash);
-const offlineError = err => /fetch|network|load failed|anmeld|abgelaufen|\b40[13]\b/i.test(err?.message || '');
+const offlineError = err => /fetch|network|load failed|verbindung|anmeld|abgelaufen|\b40[13]\b/i.test(err?.message || '');
 
 async function work() {
   if (Q.running || !previewsOn() || !loggedIn() || !navigator.onLine) return;
@@ -197,6 +199,7 @@ async function work() {
         Q.made++;
         Q.error = '';
       } catch (err) {
+        if (err.pause) break; // bleibt in der Warteschlange
         console.warn('Seitenbild', id, err);
         Q.error = err.message;
         if (offlineError(err)) break; // später nochmal

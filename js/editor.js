@@ -8,6 +8,7 @@ import { startOcclusion } from './occlusion.js';
 import { createPageNav } from './pagenav.js';
 import { markForClaude } from './claude.js';
 import { isLongPage, splitDialog } from './split.js';
+import { userActive } from './sync.js';
 
 const PEN_COLORS = ['#1c1c1e', '#1e5bd8', '#d7263d', '#159a4c', '#7b3fbf', '#ff8a00'];
 const HL_COLORS = ['#ffe03a', '#7dff7a', '#62d6ff', '#ff86d6', '#ffb057'];
@@ -35,7 +36,10 @@ function saveSettings() { try { localStorage.setItem('notizen.editor', JSON.stri
 let keyOwner = null;
 const toolEvents = new EventTarget();
 
-const snap = p => ({ strokes: p.strokes.slice(), texts: p.texts.slice() });
+// Seiteninhalt für Rückgängig. Strich- und Textlisten werden nie verändert, sondern immer durch neue ersetzt –
+// ein Verweis genügt also. Kopien kosteten bei großen Seiten (OneNote: 10.000 Striche) viel Speicher, und
+// jede Kopie brauchte beim Rückgängigmachen einen neuen Strich-Index.
+const snap = p => ({ strokes: p.strokes, texts: p.texts });
 const r2 = v => Math.round(v * 100) / 100;
 const inside = (b, p, pad = 0) => p.x >= b.x - pad && p.x <= b.x + b.w + pad && p.y >= b.y - pad && p.y <= b.y + b.h + pad;
 
@@ -390,6 +394,18 @@ export async function openEditor(root, nbId, embed = null) {
       else if (t.want && t.fresh) paintTile(t); // bisher leere Kachel bekommt jetzt vielleicht Handschrift
     }
   }
+  const joinBox = (b, c) => (!c ? b : !b ? c : { x: Math.min(b.x, c.x), y: Math.min(b.y, c.y), w: Math.max(b.x + b.w, c.x + c.w) - Math.min(b.x, c.x), h: Math.max(b.y + b.h, c.y + c.h) - Math.min(b.y, c.y) });
+  // Nur die Kacheln neu zeichnen, in denen sich Striche geändert haben: Unveränderte Striche sind in alter und
+  // neuer Liste dieselben Objekte. Auf großen Seiten (Rückgängig, Lasso) ein Vielfaches schneller als alles neu.
+  function redrawChanged(pv, before) {
+    const now = pv.page.strokes;
+    if (now === before) return;
+    const a = new Set(before), b = new Set(now);
+    let box = null;
+    for (const s of before) if (!b.has(s)) box = joinBox(box, ink.strokeBBox(s));
+    for (const s of now) if (!a.has(s)) box = joinBox(box, ink.strokeBBox(s));
+    if (box) redraw(pv, null, box);
+  }
   // später neu zeichnen (z. B. wenn ein Bild fertig geladen ist)
   function invalidate(pv, box) {
     for (const t of pv.active) if ((t.rendered || t.fresh) && hits(t, box)) { t.fresh = false; if (t.want) queue.add(t); }
@@ -656,6 +672,7 @@ export async function openEditor(root, nbId, embed = null) {
     const pv = E.pvs.get(el.dataset.id);
     if (!pv) return;
     e.preventDefault();
+    userActive(); // automatischen Abgleich kurz zurückstellen
     if (card && S.tool === 'card') setTool(lastDrawTool); // auf der Karte schreibt man (Rahmen gilt für die Notiz)
     try { el.setPointerCapture(e.pointerId); } catch { /* egal */ }
     const pt = toPage(pv, e);
@@ -870,20 +887,32 @@ export async function openEditor(root, nbId, embed = null) {
     if (A.drag) {
       const { dx, dy } = A.drag;
       dragVisual(0, 0);
+      // Bereich der Auswahl vorher und nachher neu zeichnen (dort waren die Striche beim Ziehen ausgeblendet)
+      const selBox = () => page.strokes.reduce((b, s) => (E.sel.ids.has(s.id) ? joinBox(b, ink.strokeBBox(s)) : b), null);
+      let box = selBox();
       if (Math.abs(dx) + Math.abs(dy) > 0.5) {
         const before = snap(page);
         page.strokes = page.strokes.map(s => (E.sel.ids.has(s.id) ? ink.translateStroke(s, dx, dy) : s));
         page.texts = page.texts.map(t => (E.sel.tids.has(t.id) ? { ...t, x: r2(t.x + dx), y: r2(t.y + dy) } : t));
         commit(pv, before);
         renderTexts(pv);
+        box = joinBox(box, selBox());
       }
-      redraw(pv);
+      if (box) redraw(pv, null, box);
+      else redraw(pv);
       updateSel();
       return;
     }
     const L = A.lasso;
     if (!L || L.length < 8) return;
-    const ids = new Set(page.strokes.filter(s => ink.strokeInPoly(s, L)).map(s => s.id));
+    // nur Striche in der Nähe des Lassos genau prüfen (räumlicher Index) – große Seiten haben Tausende
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (let i = 0; i < L.length; i += 2) { x0 = Math.min(x0, L[i]); x1 = Math.max(x1, L[i]); y0 = Math.min(y0, L[i + 1]); y1 = Math.max(y1, L[i + 1]); }
+    const near = ink.strokesIn(page.strokes, { x0, y0, x1, y1 }).filter(s => {
+      const b = ink.strokeBBox(s);
+      return b.x <= x1 && b.x + b.w >= x0 && b.y <= y1 && b.y + b.h >= y0;
+    });
+    const ids = new Set(near.filter(s => ink.strokeInPoly(s, L)).map(s => s.id));
     const tids = new Set(page.texts.filter(t => {
       const b = textBox(pv, t);
       return ink.pointInPoly(b.x + b.w / 2, b.y + b.h / 2, L) || ink.pointInPoly(b.x + 4, b.y + b.h / 2, L);
@@ -944,7 +973,7 @@ export async function openEditor(root, nbId, embed = null) {
     page.texts = page.texts.filter(t => !tids.has(t.id));
     clearSelection();
     commit(pv, before);
-    redraw(pv);
+    redrawChanged(pv, before.strokes);
     renderTexts(pv);
   }
   function addItems(pv, items, dx, dy) {
@@ -954,7 +983,7 @@ export async function openEditor(root, nbId, embed = null) {
     page.strokes = [...page.strokes, ...ns];
     page.texts = [...page.texts, ...nt];
     commit(pv, before);
-    redraw(pv);
+    redrawChanged(pv, before.strokes);
     renderTexts(pv);
     setSelection(pv, new Set(ns.map(s => s.id)), new Set(nt.map(t => t.id)));
   }
@@ -968,7 +997,7 @@ export async function openEditor(root, nbId, embed = null) {
     page.strokes = page.strokes.map(s => (ids.has(s.id) ? { ...s, color: c } : s));
     page.texts = page.texts.map(t => (tids.has(t.id) ? { ...t, color: c } : t));
     commit(pv, before);
-    redraw(pv);
+    redrawChanged(pv, before.strokes);
     renderTexts(pv);
     updateSel();
   }
@@ -1162,9 +1191,10 @@ export async function openEditor(root, nbId, embed = null) {
     const pv = E.pvs.get(id);
     if (!pv) return;
     clearSelection();
-    pv.page.strokes = st.strokes.slice();
-    pv.page.texts = st.texts.slice();
-    redraw(pv);
+    const old = pv.page.strokes;
+    pv.page.strokes = st.strokes;
+    pv.page.texts = st.texts;
+    redrawChanged(pv, old);
     renderTexts(pv);
     markDirty(pv.page);
     const r = pv.el.getBoundingClientRect(), sr = scroller.getBoundingClientRect();
@@ -1177,7 +1207,9 @@ export async function openEditor(root, nbId, embed = null) {
     const pv = E.pvs.get(page.id);
     if (pv) { pv.prevFresh = false; previewLater(); } // Vorschau später (in einer Pause) auffrischen
     clearTimeout(E.saveT);
-    E.saveT = setTimeout(flush, 400);
+    // Große Seiten (OneNote: Tausende Striche) zu speichern dauert spürbar – dort erst nach einer längeren
+    // Schreibpause. Beim Verlassen der Notiz oder der App wird ohnehin sofort gespeichert.
+    E.saveT = setTimeout(flush, page.strokes.length > 1500 ? 2000 : 400);
   }
   async function flush() {
     clearTimeout(E.saveT);
@@ -1513,7 +1545,7 @@ export async function openEditor(root, nbId, embed = null) {
     if (!gest && e.target.closest(UI_SEL) && e.touches.length < 2) return; // Tippen auf Knöpfe/Textfelder normal durchlassen
     detectTap(e);
     if (e.cancelable) e.preventDefault();
-    if (e.type === 'touchstart') stopInertia();
+    if (e.type === 'touchstart') { stopInertia(); userActive(); }
     const f = [...e.touches].filter(t => t.touchType !== 'stylus');
     if (f.length < 2 && gest?.mode === 'pinch') pinchEnd();
     if (f.length >= 2) {
@@ -1551,7 +1583,12 @@ export async function openEditor(root, nbId, embed = null) {
     e.preventDefault();
     setZoom(E.zoom * Math.exp(-e.deltaY * 0.01), e.clientX, e.clientY);
   }, { passive: false });
-  scroller.addEventListener('scroll', () => { updateVisible(); requestAnimationFrame(updatePageLabel); nav?.update(); }, { passive: true });
+  let labelQ = 0; // Seitenzahl höchstens einmal je Frame (sie liest die Lage aller Seiten)
+  scroller.addEventListener('scroll', () => {
+    updateVisible();
+    if (!labelQ) labelQ = requestAnimationFrame(() => { labelQ = 0; updatePageLabel(); });
+    nav?.update();
+  }, { passive: true });
 
   function onKey(e) {
     if (e.target.matches?.('input, textarea')) return;
@@ -1583,11 +1620,12 @@ export async function openEditor(root, nbId, embed = null) {
   // nächste Speichern hier die ältere Fassung zurückschreiben.
   async function onRemote(e) {
     const { kind, id, remote } = e.detail;
-    if (!remote) return;
+    if (!remote || E.dead) return;
     if (kind === 'notebooks' && id === nb.id) {
       const fresh = await store.get('notebooks', id);
       if (!fresh) { if (embed) embed.onClose(); else location.hash = ''; return; }
       if (fresh.pageIds.join() !== E.pages.map(p => p.id).join()) {
+        if (E.act) { setTimeout(() => onRemote(e), 500); return; } // erst den laufenden Strich fertig werden lassen
         await flush();
         if (embed) embed.onClose();
         else dispatchEvent(new HashChangeEvent('hashchange')); // Seiten hinzugekommen/weg: Notiz neu öffnen

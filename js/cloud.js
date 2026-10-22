@@ -32,7 +32,7 @@ async function authCall(path, body, token) {
     body: JSON.stringify(body || {}),
   });
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(MESSAGES[j.error_code] || MESSAGES[j.error] || j.msg || j.error_description || `Anmeldung fehlgeschlagen (${r.status})`);
+  if (!r.ok) throw Object.assign(new Error(MESSAGES[j.error_code] || MESSAGES[j.error] || j.msg || j.error_description || `Anmeldung fehlgeschlagen (${r.status})`), { status: r.status });
   return j;
 }
 
@@ -50,14 +50,25 @@ export async function signOut() {
   try { localStorage.removeItem(SESSION_KEY); } catch { /* egal */ }
   if (s) authCall('logout', {}, s.access_token).catch(() => {});
 }
+// Abgelaufene Anmeldung erneuern. Gleichzeitige Aufrufe (z. B. vier Bild-Uploads) warten auf dieselbe Erneuerung –
+// sonst würde dasselbe Erneuerungs-Token mehrfach benutzt, und Supabase kann die Sitzung dann beenden.
+// Abgemeldet wird nur, wenn Supabase die Anmeldung wirklich ablehnt – nicht bei einem kurzen Netzproblem.
+let refreshing = null;
 async function token() {
-  let s = loadSession();
+  const s = loadSession();
   if (!s) throw new Error('Bitte zuerst anmelden.');
-  if (s.expires_at - 60 < Date.now() / 1000) {
-    try { s = saveSession(await authCall('token?grant_type=refresh_token', { refresh_token: s.refresh_token })); }
-    catch (err) { if (navigator.onLine) { try { localStorage.removeItem(SESSION_KEY); } catch { /* egal */ } } throw new Error('Anmeldung abgelaufen – bitte neu anmelden.'); }
-  }
-  return s;
+  if (s.expires_at - 60 >= Date.now() / 1000) return s;
+  refreshing ??= (async () => {
+    try { return saveSession(await authCall('token?grant_type=refresh_token', { refresh_token: s.refresh_token })); }
+    catch (err) {
+      if ([400, 401, 403].includes(err.status)) {
+        try { localStorage.removeItem(SESSION_KEY); } catch { /* egal */ }
+        throw new Error('Anmeldung abgelaufen – bitte neu anmelden.');
+      }
+      throw new Error('Keine Verbindung zur Cloud – bist du online?');
+    } finally { refreshing = null; }
+  })();
+  return refreshing;
 }
 
 // ---------- Datenbank + Dateien ----------
@@ -118,7 +129,7 @@ export function cloudAdapter() {
       const rows = [];
       for (const c of changes) {
         if (c.kind === 'pages') {
-          if (c.op === 'put') await putObject(pageFile(c.id), await gzip(JSON.stringify(c.data)), 'application/gzip');
+          if (c.op === 'put') await putObject(pageFile(c.id), await gzip(c.json ?? JSON.stringify(c.data)), 'application/gzip');
           else await delObject(pageFile(c.id));
           rows.push({ ...c, data: null });
         } else {

@@ -20,6 +20,11 @@ const imagesOf = p => [
   ...(p.images || []).map(im => ({ key: im.key, w: im.w, h: im.h })),
 ];
 
+// Seitendaten grob schätzen (je Zahl im Strich ~7 Zeichen) statt alle Seiten in Text umzuwandeln –
+// das hätte bei großen OneNote-Notizen die App für Sekunden angehalten
+const pageChars = p => 300 + (p.strokes || []).reduce((n, s) => n + 90 + (s.pts?.length || 0) * 7, 0)
+  + (p.texts || []).reduce((n, t) => n + 120 + (t.text?.length || 0), 0) + (p.images || []).length * 120;
+
 // Größe je Notiz (Bilder + Seitendaten) und insgesamt
 export async function usage() {
   const [nbs, pages, blobs] = await Promise.all([store.getAll('notebooks'), store.getAll('pages'), store.allBlobs()]);
@@ -32,7 +37,7 @@ export async function usage() {
     for (const id of nb.pageIds || []) {
       const p = byPage.get(id);
       if (!p) continue;
-      data += JSON.stringify(p).length * GZ;
+      data += pageChars(p) * GZ;
       for (const im of imagesOf(p)) images += size.get(im.key) || 0;
     }
     if (nb.occl?.image?.key) images += size.get(nb.occl.image.key) || 0;

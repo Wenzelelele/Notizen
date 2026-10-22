@@ -147,8 +147,15 @@ export async function showOcclusion(root, id) {
     try { ret = sessionStorage.getItem(returnKey) || ''; sessionStorage.removeItem(returnKey); } catch { /* egal */ }
     location.hash = ret;
   }
+  let finished = false; // gespeichert oder verworfen
+  async function dropDraft() {
+    finished = true;
+    if (!isNew) return;
+    await store.delBlob(image.key);
+    try { sessionStorage.removeItem(DRAFT_KEY); } catch { /* egal */ }
+  }
   async function cancel() {
-    if (isNew) { await store.delBlob(image.key); try { sessionStorage.removeItem(DRAFT_KEY); } catch { /* egal */ } }
+    await dropDraft();
     leave();
   }
   async function save() {
@@ -167,6 +174,7 @@ export async function showOcclusion(root, id) {
       await store.put('notebooks', c);
     }
     for (const c of group) if (!keep.has(c.occl.target)) await store.del('notebooks', c.id);
+    finished = true;
     if (isNew) try { sessionStorage.removeItem(DRAFT_KEY); } catch { /* egal */ }
     toast(`${masks.length} ${masks.length === 1 ? 'Abdeck-Karte' : 'Abdeck-Karten'} gespeichert`);
     leave();
@@ -180,5 +188,11 @@ export async function showOcclusion(root, id) {
   const ro = new ResizeObserver(layout);
   ro.observe(stage);
   layout();
-  return () => { removeEventListener('keydown', onKey); ro.disconnect(); bitmap?.close?.(); };
+  return async () => {
+    removeEventListener('keydown', onKey);
+    ro.disconnect();
+    bitmap?.close?.();
+    // neue Abdeck-Karte weder gespeichert noch verworfen (z. B. mit „Zurück“ verlassen): Bild nicht liegen lassen
+    if (!finished) await dropDraft().catch(() => {});
+  };
 }
