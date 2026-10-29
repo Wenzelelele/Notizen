@@ -1199,7 +1199,7 @@ export async function openEditor(root, nbId, embed = null) {
     renderTexts(pv);
     markDirty(pv.page);
     const r = pv.el.getBoundingClientRect(), sr = scroller.getBoundingClientRect();
-    if (r.bottom < sr.top || r.top > sr.bottom) pv.el.scrollIntoView({ block: 'center' });
+    if (r.bottom < sr.top || r.top > sr.bottom) showPage(pv, 'center');
   }
   function updUndo() { undoBtn.disabled = !E.undo.length; redoBtn.disabled = !E.redo.length; }
 
@@ -1249,10 +1249,16 @@ export async function openEditor(root, nbId, embed = null) {
   }
   function jumpTo(i) {
     const pv = E.pvs.get(E.pages[i]?.id);
-    if (!pv) return;
+    if (pv) showPage(pv);
+  }
+  // Seite in den sichtbaren Bereich holen – sofort und nur im Scrollbereich der Notiz. Kein scrollIntoView mit
+  // „smooth“: Safari animiert dann weiter, auch wenn die App zwischendurch selbst scrollt (z. B. beim Zoomen
+  // gleich nach dem Einfügen einer Seite), und landet danach an der alten Zielposition – auf einer ganz anderen Seite.
+  function showPage(pv, where = 'start') {
     stopInertia();
     const r = pv.el.getBoundingClientRect(), sr = scroller.getBoundingClientRect();
-    scroller.scrollTop += r.top - sr.top - 8;
+    scroller.scrollTop += where === 'center' ? r.top + r.height / 2 - (sr.top + sr.height / 2) : r.top - sr.top - 8;
+    updateVisible();
   }
   function renumber() {
     E.pages.forEach((p, i) => { E.pvs.get(p.id).num.textContent = card ? ['Vorderseite – Frage', 'Rückseite – Antwort'][i] || `Seite ${i + 1}` : `Seite ${i + 1}`; });
@@ -1281,7 +1287,7 @@ export async function openEditor(root, nbId, embed = null) {
     else if (ref?.bg) base = { w: ref.w, h: ref.h, template: nb.template, paper: nb.paper };
     else if (ref) { const [w, h] = ref.w > ref.h ? PAGE_SIZES.a4l : PAGE_SIZES.a4p; base = { w, h, template: nb.template, paper: nb.paper }; }
     const pv = await insertPage(i, newPage(nb, base));
-    pv.el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    showPage(pv);
   }
   async function duplicatePage(i) {
     const src = E.pages[i], p = JSON.parse(JSON.stringify(src));
@@ -1327,7 +1333,7 @@ export async function openEditor(root, nbId, embed = null) {
     pagesEl.insertBefore(el, next ? E.pvs.get(next.id).el : null);
     await saveNb();
     renumber();
-    el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    showPage(E.pvs.get(p.id), 'center');
   }
   function setPageProp(pv, k, v) { pv.page[k] = v; redraw(pv); markDirty(pv.page); }
 
@@ -1402,7 +1408,7 @@ export async function openEditor(root, nbId, embed = null) {
         layoutAll();
         updateVisible();
         renumber();
-        if (added[0]) E.pvs.get(added[0].id).el.scrollIntoView({ block: 'start' });
+        if (added[0]) showPage(E.pvs.get(added[0].id));
       } catch (err) {
         console.error(err);
         toast('Import fehlgeschlagen: ' + err.message);
