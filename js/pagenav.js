@@ -168,7 +168,8 @@ export function createPageNav(api) {
       scheduleThumbs();
     }, 40);
   }
-  side.addEventListener('scroll', () => { userScroll = Date.now(); frame(drawList); }, { passive: true });
+  let autoTop = -1; // zuletzt von der App selbst gesetzte Position – das zählt nicht als Scrollen von Hand
+  side.addEventListener('scroll', () => { if (Math.abs(side.scrollTop - autoTop) > 2) userScroll = Date.now(); frame(drawList); }, { passive: true });
 
   function markActive() {
     const i = api.current();
@@ -179,7 +180,10 @@ export function createPageNav(api) {
     // aktuelle Seite in der Übersicht sichtbar halten (außer man scrollt dort gerade selbst)
     if (open && Date.now() - userScroll > 1500) {
       const top = i * ITEM_H;
-      if (top < side.scrollTop || top + ITEM_H > side.scrollTop + side.clientHeight) side.scrollTop = top - side.clientHeight / 2 + ITEM_H / 2;
+      if (top < side.scrollTop || top + ITEM_H > side.scrollTop + side.clientHeight) {
+        side.scrollTop = Math.max(0, top - side.clientHeight / 2 + ITEM_H / 2);
+        autoTop = side.scrollTop;
+      }
     }
   }
 
@@ -198,7 +202,8 @@ export function createPageNav(api) {
     setOpen(v) {
       open = !!v;
       side.classList.toggle('on', open);
-      if (open) { active = -1; markActive(); frame(drawList); }
+      // erst die volle Höhe der Liste, dann zur aktuellen Seite – sonst bleibt die Liste bei Seite 1 stehen
+      if (open) { list.style.height = api.pages().length * ITEM_H + 'px'; userScroll = 0; active = -1; markActive(); frame(drawList); }
       else { for (const el of items.values()) el.remove(); items.clear(); }
     },
     refresh() { for (const el of items.values()) el.remove(); items.clear(); if (open) drawList(); placeKnob(); },

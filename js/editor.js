@@ -1,5 +1,5 @@
 // Notizbuch-Editor: Seiten anzeigen, mit Stift/Maus zeichnen, Lasso, Text, Rückgängig, Zoom.
-import { store, uid, newPage, changes } from './store.js';
+import { store, uid, newPage, changes, PAGE_SIZES } from './store.js';
 import * as ink from './ink.js';
 import { h, icon, menu, modal, confirmDialog, promptText, toast, progress, pickFiles, download, safeName } from './ui.js';
 import { importPdf, exportPdf } from './pdfio.js';
@@ -575,6 +575,7 @@ export async function openEditor(root, nbId, embed = null) {
     }
     updateVisible();
     for (const pv of E.pvs.values()) syncAssets(pv);
+    labelLater(); // nach dem Zoomen kann eine andere Seite in der Mitte stehen
   }
   function setZoom(z, cx, cy) {
     if (cx == null) { const sr = scroller.getBoundingClientRect(); cx = sr.left + sr.width / 2; cy = sr.top + sr.height / 2; }
@@ -1273,9 +1274,13 @@ export async function openEditor(root, nbId, embed = null) {
   }
   async function addPageAfter(i) {
     const ref = E.pages[i];
-    // Vorlage/Größe nur von "normalen" Seiten übernehmen, nicht von PDF- oder langen OneNote-Seiten
-    const plain = ref && !ref.bg && !ref.images?.length && ref.h <= 2000;
-    const pv = await insertPage(i, newPage(nb, plain ? ref : null));
+    // Format der Seite davor: normale Seite → gleiche Größe, Vorlage, Papier. PDF-Seite → gleich groß (Querformat
+    // bleibt Querformat), Vorlage/Papier der Notiz. Lange OneNote-/Folienseite → A4 in derselben Ausrichtung.
+    let base = null;
+    if (ref && !ref.bg && !ref.images?.length && ref.h <= 2000) base = ref;
+    else if (ref?.bg) base = { w: ref.w, h: ref.h, template: nb.template, paper: nb.paper };
+    else if (ref) { const [w, h] = ref.w > ref.h ? PAGE_SIZES.a4l : PAGE_SIZES.a4p; base = { w, h, template: nb.template, paper: nb.paper }; }
+    const pv = await insertPage(i, newPage(nb, base));
     pv.el.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
   async function duplicatePage(i) {
@@ -1561,12 +1566,20 @@ export async function openEditor(root, nbId, embed = null) {
       const t = f[0];
       if (!gest || gest.mode !== 'pan' || gest.id !== t.identifier) {
         // Rest einer Zoom-Geste (ein Finger schon oben): verschiebt noch, gibt beim Loslassen aber keinen Schwung
-        gest = { mode: 'pan', id: t.identifier, x: t.clientX, y: t.clientY, samples: [], afterPinch: gest?.mode === 'pinch' };
+        gest = { mode: 'pan', id: t.identifier, x: t.clientX, y: t.clientY, x0: t.clientX, y0: t.clientY, lock: null, samples: [], afterPinch: gest?.mode === 'pinch' };
         return;
       }
-      const dx = t.clientX - gest.x, dy = t.clientY - gest.y;
+      let dx = t.clientX - gest.x, dy = t.clientY - gest.y;
       gest.x = t.clientX;
       gest.y = t.clientY;
+      // Richtung sperren wie in iPad-Apps: Wer (fast) senkrecht wischt, scrollt nur senkrecht – sonst rutscht die
+      // Ansicht bei jedem leicht schrägen Wisch seitlich hin und her (z. B. schmale Seite zwischen breiten)
+      if (!gest.lock) {
+        const tx = Math.abs(gest.x - gest.x0), ty = Math.abs(gest.y - gest.y0);
+        if (tx + ty > 10) gest.lock = ty > 1.5 * tx ? 'y' : tx > 1.5 * ty ? 'x' : 'xy';
+      }
+      if (gest.lock === 'y') dx = 0;
+      else if (gest.lock === 'x') dy = 0;
       scroller.scrollLeft -= dx;
       scroller.scrollTop -= dy;
       gest.samples.push({ t: e.timeStamp, dx, dy });
@@ -1583,12 +1596,15 @@ export async function openEditor(root, nbId, embed = null) {
     e.preventDefault();
     setZoom(E.zoom * Math.exp(-e.deltaY * 0.01), e.clientX, e.clientY);
   }, { passive: false });
-  let labelQ = 0; // Seitenzahl höchstens einmal je Frame (sie liest die Lage aller Seiten)
-  scroller.addEventListener('scroll', () => {
-    updateVisible();
-    if (!labelQ) labelQ = requestAnimationFrame(() => { labelQ = 0; updatePageLabel(); });
-    nav?.update();
-  }, { passive: true });
+  // Seitenzahl höchstens einmal je Frame (sie liest die Lage aller Seiten); Ersatz-Zeitgeber, falls gerade keine
+  // Frames kommen – sonst bliebe die Zahl stehen
+  let labelQ = null;
+  function labelLater() {
+    if (labelQ) return;
+    const go = () => { if (!labelQ) return; cancelAnimationFrame(labelQ.r); clearTimeout(labelQ.t); labelQ = null; updatePageLabel(); };
+    labelQ = { r: requestAnimationFrame(go), t: setTimeout(go, 150) };
+  }
+  scroller.addEventListener('scroll', () => { updateVisible(); labelLater(); nav?.update(); }, { passive: true });
 
   function onKey(e) {
     if (e.target.matches?.('input, textarea')) return;
