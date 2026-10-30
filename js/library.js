@@ -318,7 +318,7 @@ export async function showLibrary(root) {
       { icon: 'folder', label: 'In Ordner verschieben', onClick: () => moveDialog(nb) },
       { icon: 'download', label: 'Als PDF exportieren', onClick: () => exportNb(nb) },
       { icon: 'file', label: 'In Seiten aufteilen', onClick: async () => { if (await splitDialog([nb])) await reload(); } },
-      { icon: 'copy', label: 'Mit anderer Notiz zusammenführen …', onClick: async () => { if (await mergeDialog(nb, notebooks, folders)) await reload(); } },
+      { icon: 'copy', label: 'Mit anderer Notiz zusammenführen …', onClick: async () => { if (await mergeDialog(nb, notebooks)) await reload(); } },
       (nb.kind === 'pdf' || nb.kind === 'onenote') && { icon: 'download', label: 'Speicher verkleinern', onClick: async () => { await shrinkWithProgress([nb]); await reload(); } },
       { sep: true },
       { icon: 'trash', label: 'Löschen', danger: true, onClick: async () => {

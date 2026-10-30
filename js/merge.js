@@ -246,19 +246,17 @@ export async function mergeNotes(a, b, onProgress = () => {}) {
 }
 
 // ---------- Dialog (Bibliothek: ⋯ an einer Notiz → „Mit anderer Notiz zusammenführen …“) ----------
-export async function mergeDialog(a, notebooks, folders) {
-  const byId = new Map(folders.map(f => [f.id, f]));
-  const pathOf = id => { const p = []; for (let f = byId.get(id); f && p.length < 20; f = byId.get(f.parentId)) p.unshift(f.name); return p.join(' › ') || 'Oberste Ebene'; };
+export async function mergeDialog(a, notebooks) {
   const norm = s => (s || '').toLowerCase().replace(/[^a-z0-9äöüß]+/g, '');
-  const others = notebooks.filter(n => n.id !== a.id && n.kind !== 'card' && !n.occl)
-    .sort((x, y) => (norm(y.title) === norm(a.title)) - (norm(x.title) === norm(a.title))
-      || (y.folderId === a.folderId) - (x.folderId === a.folderId) || (y.updatedAt || 0) - (x.updatedAt || 0))
-    .slice(0, 60);
-  if (!others.length) { toast('Es gibt keine andere Notiz zum Zusammenführen.'); return null; }
+  const fmt = ts => new Date(ts || Date.now()).toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' });
+  // nur Notizen aus demselben Ordner – gleich benannte zuerst, dann die zuletzt geänderten
+  const others = notebooks.filter(n => n.id !== a.id && n.kind !== 'card' && !n.occl && (n.folderId || null) === (a.folderId || null))
+    .sort((x, y) => (norm(y.title) === norm(a.title)) - (norm(x.title) === norm(a.title)) || (y.updatedAt || 0) - (x.updatedAt || 0));
+  if (!others.length) { toast('In diesem Ordner gibt es keine andere Notiz zum Zusammenführen.'); return null; }
   let pick = others[0].id;
   const list = h('div', { class: 'picks' }, others.map(n => h('label', { class: 'pick' },
     h('input', { type: 'radio', name: 'merge', checked: n.id === pick, onchange: () => { pick = n.id; } }),
-    h('span', { class: 'grow' }, h('b', {}, n.title), h('span', { class: 'muted small' }, `${n.pageIds.length} Seiten · ${pathOf(n.folderId)}`)))));
+    h('span', { class: 'grow' }, h('b', {}, n.title), h('span', { class: 'muted small' }, `${n.pageIds.length} ${n.pageIds.length === 1 ? 'Seite' : 'Seiten'} · geändert ${fmt(n.updatedAt)}`)))));
   const ok = await modal({
     title: 'Zusammenführen mit …',
     body: h('div', { class: 'help' },
