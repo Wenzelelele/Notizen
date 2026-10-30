@@ -1,10 +1,10 @@
 // Offline-Fähigkeit: App-Dateien kommen aus dem Cache und werden im Hintergrund aktualisiert
 // (beim nächsten Öffnen ist dann die neue Version da). Notizen selbst liegen ohnehin im Gerät.
-const CACHE = 'notizen-v1793282671292';
+const CACHE = 'notizen-v1793351230423';
 const SHELL = [
   './', 'index.html', 'manifest.json', 'icon.svg', 'icon-180.png', 'icon-512.png', 'css/style.css',
   'js/main.js', 'js/library.js', 'js/editor.js', 'js/ink.js', 'js/ui.js', 'js/store.js',
-  'js/pdfio.js', 'js/onenote.js', 'js/sync.js', 'js/cloud.js', 'js/config.js', 'js/srs.js', 'js/cards.js', 'js/review.js', 'js/occlusion.js', 'js/version.js', 'js/split.js', 'js/claude.js', 'js/inbox.js', 'js/storage.js', 'js/pagenav.js',
+  'js/pdfio.js', 'js/onenote.js', 'js/sync.js', 'js/cloud.js', 'js/config.js', 'js/srs.js', 'js/cards.js', 'js/review.js', 'js/occlusion.js', 'js/version.js', 'js/split.js', 'js/claude.js', 'js/inbox.js', 'js/storage.js', 'js/pagenav.js', 'js/merge.js',
 ];
 // GitHub Pages erlaubt dem Browser, Dateien 10 Minuten zwischenzuspeichern (max-age=600). Ohne Rückfrage beim
 // Server landen nach einem Update sonst alte Dateien im neuen Cache. Unveränderte Dateien kommen als kurzes 304.

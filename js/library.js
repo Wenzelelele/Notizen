@@ -20,6 +20,7 @@ import { splitDialog } from './split.js';
 import { claudeDialog } from './claude.js';
 import { checkInbox, inboxDialog } from './inbox.js';
 import { storageDialog, shrinkWithProgress } from './storage.js';
+import { mergeDialog } from './merge.js';
 
 const COVERS = ['#2f6fed', '#e0533d', '#2e9e6b', '#8a55d6', '#f0a020', '#3b4252', '#d94d8a', '#1a9bb0'];
 const FOLDER_KEY = 'notizen.folder';
@@ -317,6 +318,7 @@ export async function showLibrary(root) {
       { icon: 'folder', label: 'In Ordner verschieben', onClick: () => moveDialog(nb) },
       { icon: 'download', label: 'Als PDF exportieren', onClick: () => exportNb(nb) },
       { icon: 'file', label: 'In Seiten aufteilen', onClick: async () => { if (await splitDialog([nb])) await reload(); } },
+      { icon: 'copy', label: 'Mit anderer Notiz zusammenführen …', onClick: async () => { if (await mergeDialog(nb, notebooks, folders)) await reload(); } },
       (nb.kind === 'pdf' || nb.kind === 'onenote') && { icon: 'download', label: 'Speicher verkleinern', onClick: async () => { await shrinkWithProgress([nb]); await reload(); } },
       { sep: true },
       { icon: 'trash', label: 'Löschen', danger: true, onClick: async () => {
