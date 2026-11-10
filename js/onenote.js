@@ -1,7 +1,6 @@
 // Import der am PC konvertierten OneNote-Notizbücher (onenote-export.bat → Ordner import/, über den lokalen Server).
 import { store, newNotebook } from './store.js';
-import { drawBackground, drawImages, drawInk, drawText } from './ink.js';
-import { loadImage } from './pdfio.js';
+import { makeCover } from './covers.js';
 
 // Online-Version (https): den Export direkt vom PC-Server holen – klappt nur am PC selbst, während der Server läuft
 const IMPORT_BASE = location.protocol === 'https:' ? 'http://localhost:5173/import/' : 'import/';
@@ -51,34 +50,16 @@ export async function importPage(pg, { folderId, order }) {
     texts: pj.texts.map((t, i) => ({ ...t, id: 'x' + i })),
     images: [],
   };
-  const forThumb = new Map();
   for (const [i, im] of pj.images.entries()) {
     const blob = await (await fetchOk(url(im.file))).blob();
     const rec = { id: 'i' + i, key: 'img_' + base + '_' + i, x: im.x, y: im.y, w: im.w, h: im.h };
     await store.putBlob(rec.key, blob);
     page.images.push(rec);
-    if (im.y < 1400 && im.x < 900) forThumb.set(rec.id, await loadImage(blob));
   }
-  nb.thumb = thumbnail(page, forThumb);
-  for (const b of forThumb.values()) b.close?.();
   await store.put('pages', page);
   nb.pageIds = [page.id];
   await store.put('notebooks', nb, { keepTime: true });
+  // Vorschaubild gleich aus der geladenen Seite (linker oberer Ausschnitt) – nur auf diesem Gerät, siehe covers.js
+  await makeCover(nb, [page]).catch(err => console.warn('Vorschaubild', err));
   return nb;
-}
-
-// Vorschaubild: linker oberer Ausschnitt der Seite (Titel + Seitenanfang)
-function thumbnail(page, imgs) {
-  const vw = Math.min(page.w, 900), vh = (vw * 4) / 3, sc = 240 / vw;
-  const c = document.createElement('canvas');
-  c.width = 240;
-  c.height = 320;
-  const ctx = c.getContext('2d');
-  ctx.scale(sc, sc);
-  const r = { x0: 0, y0: 0, x1: vw, y1: vh };
-  drawBackground(ctx, page, null, 0, vh);
-  drawImages(ctx, page.images, imgs, r);
-  drawInk(ctx, page.strokes, null, r, sc);
-  for (const t of page.texts) if (t.y < vh) drawText(ctx, t);
-  return c.toDataURL('image/jpeg', 0.8);
 }

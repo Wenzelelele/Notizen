@@ -10,23 +10,34 @@ import { startClaude, showConsent } from './claude.js';
 const app = document.getElementById('app');
 // Claude verbindet sich gerade (Anmeldung über Supabase, siehe claude.js): nur die Zustimmungsseite zeigen
 const consentId = new URLSearchParams(location.search).get('authorization_id');
-let destroy = null, seq = 0;
+let destroy = null, seq = 0, routes = 0;
 
 async function route() {
   const my = ++seq;
   closeMenus();
-  if (destroy) { const d = destroy; destroy = null; await d(); } // speichert u. a. die offene Notiz
-  if (updateReady && !busy()) { applyUpdate(); return; }
-  const m = location.hash.match(/^#nb\/(.+)$/), lern = location.hash.match(/^#lernen(?:\/(.+))?$/), occl = location.hash.match(/^#abdecken\/(.+)$/);
-  const d = m ? await openEditor(app, decodeURIComponent(m[1]))
-    : lern ? await showReview(app, lern[1] ? decodeURIComponent(lern[1]) : null)
-    : occl ? await showOcclusion(app, decodeURIComponent(occl[1]))
-    : await showLibrary(app);
-  if (my !== seq) { await d?.(); return; }
-  destroy = d;
+  // Dauert der Wechsel spürbar (große Notiz laden, speichern), zeigt ein Laufbalken am oberen Rand, dass die
+  // Berührung angekommen ist – bis dahin steht noch die alte Ansicht da
+  routes++;
+  const wait = setTimeout(() => document.body.classList.add('routing'), 120);
+  try {
+    if (destroy) { const d = destroy; destroy = null; await d(); } // speichert u. a. die offene Notiz
+    if (updateReady && !busy()) { applyUpdate(); return; }
+    const m = location.hash.match(/^#nb\/(.+)$/), lern = location.hash.match(/^#lernen(?:\/(.+))?$/), occl = location.hash.match(/^#abdecken\/(.+)$/);
+    const d = m ? await openEditor(app, decodeURIComponent(m[1]))
+      : lern ? await showReview(app, lern[1] ? decodeURIComponent(lern[1]) : null)
+      : occl ? await showOcclusion(app, decodeURIComponent(occl[1]))
+      : await showLibrary(app);
+    if (my !== seq) { await d?.(); return; }
+    destroy = d;
+  } finally {
+    clearTimeout(wait);
+    if (--routes === 0) document.body.classList.remove('routing');
+  }
 }
 
 if (!consentId) addEventListener('hashchange', route);
+// iPad: Ohne (irgendeinen) Berührungs-Lauscher zeigt Safari den gedrückten Zustand von Knöpfen (:active) nicht an
+document.addEventListener('touchstart', () => {}, { passive: true });
 // iPad: Safari-eigenes Zoomen der ganzen Seite verhindern (wir zoomen selbst)
 document.addEventListener('gesturestart', e => e.preventDefault());
 // Browser bitten, die Notizen nicht bei Speicherknappheit automatisch zu löschen

@@ -4,7 +4,7 @@
 // Speicher-"Adapter": Cloud (Supabase, cloud.js) – oder ohne Cloud-Konfiguration der PC-Server (httpAdapter).
 import { store, uid } from './store.js';
 import { h, modal, toast, progress, field } from './ui.js';
-import { cloudConfigured, cloudAdapter, currentUser, signIn, signUp, signOut } from './cloud.js';
+import { cloudConfigured, cloudAdapter, currentUser, signIn, signUp, signOut, pool } from './cloud.js';
 
 // ---------- Sync-Speicher auf dem PC (server.js) ----------
 export function httpAdapter(base, key) {
@@ -30,14 +30,6 @@ export async function deviceId() {
   let d = await store.getMeta('deviceId');
   if (!d) { d = uid(); await store.setMeta('deviceId', d); }
   return d;
-}
-
-// n Aufgaben gleichzeitig (Bilder hoch-/herunterladen)
-async function pool(items, n, fn) {
-  let i = 0;
-  await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => {
-    while (i < items.length) { const k = i++; await fn(items[k], k); }
-  }));
 }
 
 // ---------- Abgleich ----------
@@ -99,23 +91,50 @@ async function doSync(adapter, onProgress) {
       const local = pending.get(c.kind + ':' + c.id);
       return !(local && local.at >= c.at); // hier gibt es eine neuere, noch nicht hochgeladene Version
     });
+    // Reihenfolge: Bilder → Seiten → Ordner/Notizen. So zeigt eine Seite nie auf fehlende Bilder und eine Notiz
+    // nie auf Seiten, die noch unterwegs sind. Jede Seite wird gleich nach dem Laden gespeichert (vier parallel).
+    const settled = async c => {
+      const local = pending.get(c.kind + ':' + c.id);
+      if (local) await store.outboxDone([local]);
+      if (c.kind !== 'blobs' || c.op !== 'put') onProgress(`Herunterladen: ${++got} Änderungen`, null);
+    };
     await pool(todo.filter(c => c.kind === 'blobs' && c.op === 'put'), 4, async c => {
       try { await store.putBlob(c.id, await adapter.getBlob(c.id), { sync: false }); } catch { missing++; }
       onProgress(`Herunterladen: ${++got} Änderungen`, null);
+      await settled(c);
     });
     for (const c of todo) {
-      if (c.kind === 'blobs') { if (c.op === 'del') await store.delBlob(c.id, { sync: false }); }
-      else if (c.op === 'put') { if (c.data) await store.put(c.kind, c.data, { sync: false, keepTime: true }); }
-      else await store.del(c.kind, c.id, { sync: false });
-      const local = pending.get(c.kind + ':' + c.id);
-      if (local) await store.outboxDone([local]);
-      if (c.kind !== 'blobs') onProgress(`Herunterladen: ${++got} Änderungen`, null);
+      if (c.kind !== 'blobs' || c.op !== 'del') continue;
+      await store.delBlob(c.id, { sync: false });
+      if (c.id.startsWith('pdf_')) await store.delMetaPrefix('pdfbg:' + c.id + ':'); // Seitenbilder dieses PDFs (nur auf dem Gerät)
+      await settled(c);
+    }
+    await pool(todo.filter(c => c.kind === 'pages'), 4, async c => {
+      if (c.op === 'put') {
+        const data = c.data ?? (c.load ? await c.load() : null);
+        if (data) await store.put('pages', data, { sync: false, keepTime: true });
+      } else {
+        await store.del('pages', c.id, { sync: false });
+        await store.delMeta('thumb:' + c.id);
+      }
+      await settled(c);
+    });
+    for (const c of todo) {
+      if (c.kind === 'blobs' || c.kind === 'pages') continue;
+      if (c.op === 'put') { if (c.data) await store.put(c.kind, c.data, { sync: false, keepTime: true }); }
+      else {
+        await store.del(c.kind, c.id, { sync: false });
+        if (c.kind === 'notebooks') await store.delMeta('cover:' + c.id);
+      }
+      await settled(c);
     }
     cursor = res.cursor;
     more = res.more;
     await store.setMeta('cursor', cursor);
   }
   await store.setMeta('lastSync', Date.now());
+  if (target.startsWith('cloud:')) usedCloud = true;
+  fails = 0;
   setStatus('ok');
   return { sent: box.length, received: got, missing };
 }
@@ -146,10 +165,30 @@ export async function autoSync() {
     const r = await syncNow(cloudAdapter());
     if (r.received) syncEvents.dispatchEvent(new Event('received'));
   } catch (err) {
+    fails++;
     setStatus('error', err.message);
+    // Abgelaufene Anmeldung: Danach läuft kein automatischer Abgleich mehr – das soll nicht unbemerkt bleiben
+    if (!currentUser()) toast('Cloud-Abgleich pausiert: Anmeldung abgelaufen – bitte in der Übersicht neu anmelden.');
   }
 }
+
+// Gibt es etwas, das der Benutzer über den Abgleich wissen sollte? null = alles in Ordnung (oder kein Cloud-Sync
+// eingerichtet). Bibliothek und Editor zeigen den Hinweis an – sonst merkt man tagelang nicht, dass nichts mehr
+// in die Cloud geht.
+let usedCloud = false; // dieses Gerät wurde schon einmal mit der Cloud abgeglichen
+let fails = 0;         // automatische Abgleiche, die hintereinander gescheitert sind
+const OFF_KEY = 'notizen.syncOff';
+export function syncProblem() {
+  if (!cloudConfigured()) return null;
+  let off = false; // selbst abgemeldet: kein Hinweis
+  try { off = !!localStorage.getItem(OFF_KEY); } catch { /* egal */ }
+  if (!currentUser()) return usedCloud && !off ? { kind: 'login', text: 'Du bist abgemeldet – Änderungen werden gerade nicht mit der Cloud abgeglichen.', action: 'Anmelden' } : null;
+  if (status.state === 'error' && fails >= 3) return { kind: 'error', text: 'Der letzte Abgleich ist fehlgeschlagen: ' + status.text, action: 'Nochmal versuchen' };
+  return null;
+}
+
 export function startAutoSync() {
+  store.getMeta('syncTarget').then(t => { usedCloud = String(t || '').startsWith('cloud:'); syncEvents.dispatchEvent(new Event('status')); }).catch(() => {});
   setTimeout(autoSync, 2000);
   setInterval(autoSync, 60000);
   addEventListener('online', autoSync);
@@ -174,7 +213,13 @@ export async function syncDialog(onDone) {
         : `Letzter Abgleich: ${last ? new Date(last).toLocaleString('de-DE') : 'noch nie'} · ${pending.length} Änderungen warten aufs Hochladen.`)),
     actions: [{ label: 'Abmelden', value: 'logout' }, { label: 'Abbrechen', value: false }, { label: 'Jetzt abgleichen', value: 'sync', primary: true }],
   });
-  if (choice === 'logout') { await signOut(); toast('Abgemeldet'); return; }
+  if (choice === 'logout') {
+    await signOut();
+    try { localStorage.setItem(OFF_KEY, '1'); } catch { /* egal */ }
+    setStatus('idle');
+    toast('Abgemeldet');
+    return;
+  }
   if (choice !== 'sync') return;
   await runWithProgress(adapter, onDone);
 }
@@ -210,6 +255,7 @@ async function loginDialog() {
   const e = email.value.trim(), p = pw.value;
   if (!e || !p) { toast('Bitte E-Mail und Passwort eingeben.'); return false; }
   try {
+    try { localStorage.removeItem(OFF_KEY); } catch { /* egal */ }
     if (mode === 'signin') { await signIn(e, p); return true; }
     const r = await signUp(e, p);
     if (r.user) return true;

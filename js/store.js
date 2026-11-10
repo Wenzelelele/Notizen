@@ -52,19 +52,56 @@ function write(name, sync, key, fn) {
 const op = (req, kind) => Object.assign(req, { __op: kind });
 
 // remote: die Änderung kam per Sync von einem anderen Gerät (z. B. damit der Editor neu lädt)
+// nb: bei Seiten die Notiz, zu der sie gehören (soweit bekannt) – spart Empfängern das Nachladen der Seite
 export const changes = new EventTarget();
-const changed = (kind, id, remote = false) => changes.dispatchEvent(new CustomEvent('change', { detail: { kind, id, remote } }));
+const changed = (kind, id, remote = false, nb = null) => changes.dispatchEvent(new CustomEvent('change', { detail: { kind, id, remote, nb } }));
 
 export const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
 
 export const store = {
   get: (name, id) => run(name, 'readonly', st => st.get(id)),
   getAll: name => run(name, 'readonly', st => st.getAll()),
+  // mehrere Datensätze in einer Transaktion (Reihenfolge wie ids; fehlende sind undefined)
+  getMany: (name, ids) => db().then(d => new Promise((resolve, reject) => {
+    const out = new Array(ids.length);
+    if (!ids.length) { resolve(out); return; }
+    const tx = d.transaction(name), st = tx.objectStore(name);
+    ids.forEach((id, i) => { st.get(id).onsuccess = e => { out[i] = e.target.result; }; });
+    tx.oncomplete = () => resolve(out);
+    tx.onerror = tx.onabort = () => reject(tx.error);
+  })),
+  // alle Datensätze nacheinander durchgehen, ohne sie gleichzeitig im Arbeitsspeicher zu halten
+  // (alle Seiten zusammen sind bei großen OneNote-Importen weit über 100 MB)
+  each: (name, fn) => db().then(d => new Promise((resolve, reject) => {
+    const tx = d.transaction(name), cur = tx.objectStore(name).openCursor();
+    cur.onsuccess = () => { const c = cur.result; if (c) { fn(c.value, c.key); c.continue(); } };
+    tx.oncomplete = () => resolve();
+    tx.onerror = tx.onabort = () => reject(tx.error);
+  })),
   // keepTime: Änderungszeit nicht neu setzen (z. B. beim Import das Datum aus OneNote behalten)
   // sync: false, wenn die Änderung von einem anderen Gerät kommt (nicht wieder zurückschicken)
   put(name, obj, { keepTime = false, sync = true } = {}) {
     if (!keepTime || !obj.updatedAt) obj.updatedAt = Date.now();
-    return write(name, sync, obj.id, st => op(st.put(obj), 'put')).then(() => changed(name, obj.id, !sync));
+    return write(name, sync, obj.id, st => op(st.put(obj), 'put')).then(() => changed(name, obj.id, !sync, name === 'pages' ? obj.notebookId : null));
+  },
+  // Viele Schreibvorgänge in EINER Transaktion (z. B. eine Notiz mit hunderten Seiten und Bildern löschen):
+  // ops = [{ name, op: 'put' | 'del', key, value }] – bei 'put' in Ordner/Notizen/Seiten genügt value.
+  // Einzelne Transaktionen brauchen dafür Sekunden, eine gemeinsame einen Augenblick.
+  batch(ops, { sync = true, keepTime = false } = {}) {
+    if (!ops.length) return Promise.resolve();
+    const names = new Set(ops.map(o => o.name));
+    const logged = sync && ops.some(o => SYNCED.has(o.name));
+    if (logged) names.add('outbox');
+    const now = Date.now();
+    return txn([...names], 'readwrite', tx => {
+      for (const o of ops) {
+        const st = tx.objectStore(o.name), key = o.key ?? o.value?.id;
+        if (o.op === 'del') st.delete(key);
+        else if (st.keyPath) { if (!keepTime || !o.value.updatedAt) o.value.updatedAt = now; st.put(o.value); }
+        else st.put(o.value, key);
+        if (sync && SYNCED.has(o.name)) tx.objectStore('outbox').put({ key: o.name + ':' + key, kind: o.name, id: key, op: o.op === 'del' ? 'del' : 'put', at: now });
+      }
+    }).then(() => { for (const o of ops) if (SYNCED.has(o.name)) changed(o.name, o.key ?? o.value?.id, !sync, o.name === 'pages' ? o.value?.notebookId : null); });
   },
   del: (name, id, { sync = true } = {}) => write(name, sync, id, st => op(st.delete(id), 'del')).then(() => changed(name, id, !sync)),
   getBlob: key => run('blobs', 'readonly', st => st.get(key)),
@@ -74,6 +111,9 @@ export const store = {
   // ---------- Sync-Hilfen ----------
   getMeta: key => run('meta', 'readonly', st => st.get(key)),
   setMeta: (key, value) => run('meta', 'readwrite', st => st.put(value, key)),
+  delMeta: key => run('meta', 'readwrite', st => st.delete(key)),
+  // alles unter einem Schlüssel-Anfang löschen (z. B. die Seitenbilder eines PDFs: "pdfbg:<pdf>:")
+  delMetaPrefix: prefix => run('meta', 'readwrite', st => st.delete(IDBKeyRange.bound(prefix, prefix + '￿'))),
   outboxAll: () => run('outbox', 'readonly', st => st.getAll()),
   // abgeglichene Einträge entfernen – aber nur, wenn sie seitdem nicht erneut geändert wurden
   outboxDone: entries => txn('outbox', 'readwrite', tx => {
@@ -99,18 +139,24 @@ export const store = {
   }),
 
   async pagesOf(nb) {
-    const pages = await Promise.all(nb.pageIds.map(id => this.get('pages', id)));
-    return pages.filter(Boolean);
+    return (await this.getMany('pages', nb.pageIds || [])).filter(Boolean);
   },
 
+  // Notiz mit allen Seiten, Bildern und (bei PDF-Notizen) dem Original-PDF löschen – in einer Transaktion.
+  // Seiten mit page.pdf haben kein Bild im abgeglichenen Speicher: ihr Seitenbild liegt nur auf dem Gerät (siehe pdfio.js).
   async deleteNotebook(nb) {
-    for (const id of nb.pageIds) {
-      const p = await this.get('pages', id);
-      if (p?.bg) await this.delBlob(p.bg);
-      for (const im of p?.images || []) await this.delBlob(im.key);
-      await this.del('pages', id);
+    const ops = [], pdfs = new Set();
+    for (const id of nb.pageIds || []) {
+      const p = await this.get('pages', id); // einzeln, damit nie alle (großen) Seiten gleichzeitig im Speicher liegen
+      if (p?.pdf) pdfs.add(p.pdf.key);
+      else if (p?.bg) ops.push({ name: 'blobs', op: 'del', key: p.bg });
+      for (const im of p?.images || []) ops.push({ name: 'blobs', op: 'del', key: im.key });
+      ops.push({ name: 'pages', op: 'del', key: id }, { name: 'meta', op: 'del', key: 'thumb:' + id });
     }
-    await this.del('notebooks', nb.id);
+    for (const k of pdfs) ops.push({ name: 'blobs', op: 'del', key: k });
+    ops.push({ name: 'notebooks', op: 'del', key: nb.id }, { name: 'meta', op: 'del', key: 'cover:' + nb.id });
+    await this.batch(ops);
+    for (const k of pdfs) await this.delMetaPrefix('pdfbg:' + k + ':');
   },
 
   allBlobs: () => db().then(d => new Promise((resolve, reject) => {

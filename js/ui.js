@@ -53,6 +53,9 @@ const ICONS = {
   arrowUp: '<path d="m18 15-6-6-6 6"/>',
   arrowDown: '<path d="m6 9 6 6 6-6"/>',
   sparkle: '<path d="M11 3.5 12.9 9l5.6 1.9-5.6 1.9L11 18.5l-1.9-5.7-5.6-1.9L9.1 9z"/><path d="M19 3v4M17 5h4M18.5 16.5v3M17 18h3"/>',
+  image: '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/>',
+  search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
+  close: '<path d="M18 6 6 18M6 6l12 12"/>',
 };
 
 export function icon(name) {

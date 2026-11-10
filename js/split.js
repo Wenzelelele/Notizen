@@ -148,7 +148,8 @@ export async function splitNote(nb) {
 }
 
 // Mit Rückfrage: erst zählen, was entstehen würde, dann aufteilen. true, wenn etwas aufgeteilt wurde.
-export async function splitDialog(notes) {
+// quiet: nichts melden, wenn es nichts aufzuteilen gibt (Angebot direkt nach dem OneNote-Import)
+export async function splitDialog(notes, { quiet = false } = {}) {
   notes = notes.filter(n => n.kind !== 'card' && !n.occl);
   let pr = progress('Lange Seiten werden gesucht …');
   const todo = [];
@@ -165,10 +166,10 @@ export async function splitDialog(notes) {
       if (n) { todo.push(nb); longPages += n; newPages += parts; }
     }
   } finally { pr.close(); }
-  if (!todo.length) { toast('Keine langen Seiten zum Aufteilen gefunden.'); return false; }
+  if (!todo.length) { if (!quiet) toast('Keine langen Seiten zum Aufteilen gefunden.'); return false; }
   const what = todo.length === 1 ? `„${todo[0].title}“` : `${todo.length} Notizen`;
   const ok = await confirmDialog('In Seiten aufteilen?',
-    `${what}: ${longPages === 1 ? 'Die lange Seite wird' : longPages + ' lange Seiten werden'} in insgesamt ${newPages} einzelne Seiten aufgeteilt – zwischen den Folien bzw. an leeren Stellen. Handschrift, Bilder und Texte bleiben vollständig erhalten. Danach kannst du an jeder Stelle Seiten einfügen.`,
+    `${what}: ${longPages === 1 ? 'Die lange Seite wird' : longPages + ' lange Seiten werden'} in insgesamt ${newPages} einzelne Seiten aufgeteilt – zwischen den Folien bzw. an leeren Stellen. Handschrift, Bilder und Texte bleiben vollständig erhalten. Danach kannst du an jeder Stelle Seiten einfügen, und Speichern und Abgleich gehen schneller (es wird nur noch die geänderte Seite übertragen statt der ganzen Rolle).`,
     'Aufteilen');
   if (!ok) return false;
   pr = progress('Seiten werden aufgeteilt …');

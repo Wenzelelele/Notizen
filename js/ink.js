@@ -61,6 +61,39 @@ export function drawBackground(ctx, page, bgImg, y0 = 0, y1 = page.h) {
   ctx.restore();
 }
 
+// Dasselbe Papier als CSS-Hintergrund (Farbe + SVG-Bild) für die Seite im Editor. Dort liegt das Papier ganz
+// unten, darüber Bilder, darüber die (durchsichtigen) Kacheln mit der Handschrift – so sind eingefügte Bilder
+// auch auf liniertem Papier sichtbar, und leere Kacheln brauchen gar kein Canvas. Der Browser zeichnet das SVG
+// in jeder Zoomstufe scharf. Muss zu drawBackground passen (Export, Vorschaubilder).
+export function backgroundCss(page) {
+  const P = PAPERS[page.paper] || PAPERS.white, W = page.w, H = page.h, t = page.template;
+  let body = '';
+  if (t === 'lined' || t === 'cornell') {
+    const top = 110, gap = 34;
+    let d = '';
+    for (let y = top; y < H - 20; y += gap) d += `M0 ${y}H${W}`;
+    body = `<path d="${d}" stroke="${P.line}" stroke-width="1"/>`;
+    if (t === 'lined') body += `<path d="M90 0V${H}" stroke="${P.margin}" stroke-width="1.5"/>`;
+    else {
+      const cx = Math.round(W * 0.3), sy = H - 210;
+      body += `<path d="M0 ${top - gap}H${W}M${cx} ${top - gap}V${sy}M0 ${sy}H${W}" stroke="${P.margin}" stroke-width="1.5"/>`;
+    }
+  } else if (t === 'grid') {
+    const g = 26;
+    let d = '';
+    for (let x = g; x < W; x += g) d += `M${x} 0V${H}`;
+    for (let y = g; y < H; y += g) d += `M0 ${y}H${W}`;
+    body = `<path d="${d}" stroke="${P.line}" stroke-width="1" stroke-opacity=".75"/>`;
+  } else if (t === 'dots') {
+    const g = 26;
+    body = `<defs><pattern id="d" x="${g / 2}" y="${g / 2}" width="${g}" height="${g}" patternUnits="userSpaceOnUse"><circle cx="${g / 2}" cy="${g / 2}" r="1.4" fill="${P.line}"/></pattern></defs>`
+      + `<rect x="${g / 2}" y="${g / 2}" width="${W}" height="${H}" fill="url(#d)"/>`;
+  }
+  if (!body || page.bg) return page.bg ? '#ffffff' : P.bg;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" fill="none">${body}</svg>`;
+  return `${P.bg} url("data:image/svg+xml,${encodeURIComponent(svg)}") 0 0 / 100% 100% no-repeat`;
+}
+
 const touches = (r, x, y, w, h) => !r || (x <= r.x1 && x + w >= r.x0 && y <= r.y1 && y + h >= r.y0);
 
 // Bilder einer Seite (z. B. Folien aus OneNote); noch nicht geladene als hellgraue Fläche.
@@ -343,6 +376,13 @@ export function translateStroke(s, dx, dy) {
   const pts = s.pts.slice();
   for (let i = 0; i < pts.length; i += 3) { pts[i] = r2(pts[i] + dx); pts[i + 1] = r2(pts[i + 1] + dy); }
   return { ...s, pts };
+}
+
+// Strich um den Punkt (ax, ay) mit Faktor k vergrößern/verkleinern – die Strichbreite wächst mit
+export function scaleStroke(s, ax, ay, k) {
+  const pts = s.pts.slice();
+  for (let i = 0; i < pts.length; i += 3) { pts[i] = r2(ax + (pts[i] - ax) * k); pts[i + 1] = r2(ay + (pts[i + 1] - ay) * k); }
+  return { ...s, size: Math.max(0.3, r2(s.size * k)), pts };
 }
 
 // ---------- Formerkennung ----------

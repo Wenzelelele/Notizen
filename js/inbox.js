@@ -51,6 +51,7 @@ async function takeItem(box, id) {
       folderId, title,
       meta: { id: nbId, source: 'inbox:' + id },
       pageId: i => nbId + 'p' + i,
+      pdfKey: 'pdf_' + nbId,
       onProgress: (i, k) => pr.set(`${title} – Seite ${i} von ${k}`, i / k),
     });
   } finally { pr.close(); }

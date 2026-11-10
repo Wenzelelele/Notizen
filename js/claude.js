@@ -3,13 +3,12 @@
 // - Zustimmungsseite für diese Anmeldung (Supabase leitet auf index.html?authorization_id=… um)
 // - „Für Claude markieren“: Ausschnitt einer Seite als Bild nach claude/marked/ im Cloud-Speicher
 // - Seitenbilder previews/<seite>/ (nur wenn eingeschaltet), damit Claude auch Handschrift sieht
-// - Vorschaubilder für Karten, die Claude angelegt oder geändert hat
 // - Dialog „Claude (MCP)“ in der Bibliothek
 import { store, uid, changes } from './store.js';
 import { h, icon, modal, toast, progress, field } from './ui.js';
 import { CLOUD } from './config.js';
-import { cloudConfigured, currentUser, accessToken, userFiles } from './cloud.js';
-import { renderPage, snapshot, isCard, updateThumb } from './cards.js';
+import { cloudConfigured, currentUser, accessToken, userFiles, pool } from './cloud.js';
+import { renderPage, snapshot } from './cards.js';
 import { strokeBBox } from './ink.js';
 import { syncEvents, syncDialog } from './sync.js';
 
@@ -76,7 +75,7 @@ export async function markForClaude({ nb, page, region, loaded }) {
     const c = await renderPage(page, { scale: Math.min(2, 1400 / Math.max(region.w, region.h)), region, loaded });
     const small = await jpegUnder(c, MAX_BYTES);
     c.width = c.height = 0;
-    const full = await snapshot(page, region, loaded); // bessere Qualität, falls Claude daraus Karten mit Bild macht
+    const full = await snapshot(page, region, loaded, { jpeg: true }); // bessere Qualität, falls Claude daraus Karten mit Bild macht
     await userFiles.put(dir + id + '.jpg', small, 'image/jpeg');
     await userFiles.put(dir + id + '.full.jpg', full.blob, 'image/jpeg');
     await userFiles.put(dir + id + '.json', jsonBlob({
@@ -224,45 +223,32 @@ async function enqueueAll() {
   work();
 }
 
-// ---------- Vorschaubilder für Karten, die Claude angelegt/geändert hat ----------
-const thumbQ = new Map();
-let thumbT;
-function queueThumb(kind, id) {
-  thumbQ.set(kind + ':' + id, { kind, id });
-  clearTimeout(thumbT);
-  thumbT = setTimeout(runThumbs, 1500);
-}
-async function runThumbs() {
-  const jobs = [...thumbQ.values()];
-  thumbQ.clear();
-  const done = new Set();
-  for (const { kind, id } of jobs) {
-    try {
-      let nb, force = false;
-      if (kind === 'notebooks') nb = await store.get('notebooks', id);
-      else { const p = await store.get('pages', id); nb = p && (await store.get('notebooks', p.notebookId)); force = true; }
-      if (!nb || !isCard(nb) || nb.occl || done.has(nb.id) || (!force && nb.thumb)) continue;
-      const pages = await store.pagesOf(nb);
-      if (pages.length < nb.pageIds.length) continue; // Seiten kommen noch
-      done.add(nb.id);
-      await updateThumb(nb);
-    } catch (err) { console.warn('Kartenvorschau', err); }
-  }
-  if (done.size) syncEvents.dispatchEvent(new Event('received')); // Bibliothek neu zeichnen
+// Alle Seitenbilder aus der Cloud löschen (Speicher freigeben) und das Hochladen ausschalten – storage.js
+export async function deletePreviews(onProgress = () => {}) {
+  setSetting('previews', false);
+  await loadQueue();
+  Q.ids.clear();
+  Q.done = {};
+  saveQueue();
+  emit();
+  const dirs = await userFiles.list('previews', { dirs: true });
+  let n = 0;
+  await pool(dirs, 4, async d => {
+    for (const f of await userFiles.list('previews/' + d.name)) await userFiles.del(`previews/${d.name}/${f.name}`);
+    onProgress(++n, dirs.length);
+  });
 }
 
 let started = false;
 export async function startClaude() {
   if (started) return;
   started = true;
+  // Vorschaubilder für Karten, die Claude anlegt oder ändert, zeichnet die Bibliothek bei Bedarf (covers.js)
   changes.addEventListener('change', e => {
-    const { kind, id, remote } = e.detail;
-    if (remote && (kind === 'notebooks' || kind === 'pages')) queueThumb(kind, id);
+    const { kind, id } = e.detail;
     if (kind === 'pages' && previewsOn() && !Q.ids.has(id)) { Q.ids.add(id); saveQueue(); }
   });
   await loadQueue();
-  // Karten ohne Vorschaubild (z. B. von Claude angelegt, bevor diese Version lief)
-  for (const nb of await store.getAll('notebooks')) if (isCard(nb) && !nb.occl && !nb.thumb) queueThumb('notebooks', nb.id);
   syncEvents.addEventListener('status', () => setTimeout(work, 500));
   addEventListener('hashchange', () => setTimeout(work, 1500));
   addEventListener('online', () => setTimeout(work, 1500));

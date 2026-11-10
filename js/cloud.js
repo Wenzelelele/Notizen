@@ -6,6 +6,14 @@ import { CLOUD } from './config.js';
 const SESSION_KEY = 'notizen.session';
 const BUCKET = 'notizen';
 export const cloudConfigured = () => !!(CLOUD.url && CLOUD.key);
+
+// n Aufgaben gleichzeitig (Dateien hoch-/herunterladen)
+export async function pool(items, n, fn) {
+  let i = 0;
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => {
+    while (i < items.length) { const k = i++; await fn(items[k], k); }
+  }));
+}
 const base = () => CLOUD.url.replace(/\/+$/, '');
 
 // ---------- Anmeldung ----------
@@ -98,7 +106,8 @@ export const userFiles = {
   get: async p => (await getObject(p)),
   del: p => delObject(p),
   // Dateien eines Ordners (ohne Unterordner): [{ name, created_at, metadata }]
-  async list(dir) {
+  // dirs: true liefert stattdessen die Unterordner (Einträge ohne id)
+  async list(dir, { dirs = false } = {}) {
     const s = await token(), out = [];
     for (let offset = 0; ; offset += 1000) {
       const r = await api(`/storage/v1/object/list/${BUCKET}`, {
@@ -106,7 +115,7 @@ export const userFiles = {
         body: JSON.stringify({ prefix: `${s.user.id}/${dir}`, limit: 1000, offset, sortBy: { column: 'name', order: 'asc' } }),
       });
       const rows = await r.json();
-      out.push(...rows.filter(o => o.id));
+      out.push(...rows.filter(o => !!o.id !== dirs));
       if (rows.length < 1000) return out;
     }
   },
@@ -126,24 +135,25 @@ export function cloudAdapter() {
     target: () => 'cloud:' + (currentUser()?.id || '?'),
     info: async () => { await api('/rest/v1/records?select=seq&limit=1'); return { ok: true }; },
     async push(device, changes) {
-      const rows = [];
-      for (const c of changes) {
-        if (c.kind === 'pages') {
-          if (c.op === 'put') await putObject(pageFile(c.id), await gzip(c.json ?? JSON.stringify(c.data)), 'application/gzip');
-          else await delObject(pageFile(c.id));
-          rows.push({ ...c, data: null });
-        } else {
-          if (c.kind === 'blobs' && c.op === 'del') await delObject('blobs/' + c.id);
-          rows.push(c);
-        }
-      }
+      // Seiten-Dateien zu viert gleichzeitig hochladen bzw. löschen (wie die Bilder) – erst danach die Datensätze
+      // eintragen, damit ein Datensatz nie auf eine Datei zeigt, die es noch nicht gibt
+      await pool(changes.filter(c => c.kind === 'pages' || (c.kind === 'blobs' && c.op === 'del')), 4, async c => {
+        if (c.kind === 'blobs') await delObject('blobs/' + c.id);
+        else if (c.op === 'put') await putObject(pageFile(c.id), await gzip(c.json ?? JSON.stringify(c.data)), 'application/gzip');
+        else await delObject(pageFile(c.id));
+      });
+      const rows = changes.map(c => (c.kind === 'pages' ? { ...c, data: null } : c));
       await api('/rest/v1/rpc/sync_push', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ device, changes: rows }) });
       return { ok: true };
     },
+    // Seiten kommen ohne Inhalt: load() holt und entpackt die Datei erst, wenn sync.js die Seite einspielt –
+    // so liegen nie hunderte entpackte Seiten gleichzeitig im Arbeitsspeicher, und mehrere laden parallel.
     async pull(since) {
       const limit = 300;
       const rows = await (await api(`/rest/v1/records?select=kind,id,op,at,device,seq,data&seq=gt.${since}&order=seq.asc&limit=${limit}`)).json();
-      for (const r of rows) if (r.kind === 'pages' && r.op === 'put') r.data = await gunzip(await getObject(pageFile(r.id), r.seq));
+      for (const r of rows) {
+        if (r.kind === 'pages' && r.op === 'put') Object.defineProperty(r, 'load', { value: async () => gunzip(await getObject(pageFile(r.id), r.seq)) });
+      }
       return { changes: rows, cursor: rows.length ? rows[rows.length - 1].seq : since, more: rows.length === limit };
     },
     putBlob: (k, blob) => putObject('blobs/' + k, blob),

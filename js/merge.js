@@ -4,7 +4,7 @@
 // Es entsteht eine neue Notiz mit eigenen Kopien aller Bilder; die beiden alten bleiben unverändert.
 import { store, uid, newNotebook } from './store.js';
 import { h, modal, progress, toast } from './ui.js';
-import { loadImage } from './pdfio.js';
+import { loadImage, bgBlob } from './pdfio.js';
 
 // Vergleich in Tests (30 Folien mit gleicher Vorlage, nur andere Textzeilen; OneNote-Fassung gröber, teils
 // beschnitten, mit eingebrannter Tinte): Erst ohne die gemeinsame Vorlage und als „gegenseitig bester Treffer“
@@ -153,8 +153,8 @@ export function align(n, m, sim) {
 }
 
 // ---------- Seiten bauen ----------
-async function copyBlob(key, newKey) {
-  const b = await store.getBlob(key);
+async function copyBlob(key, newKey, blob = null) {
+  const b = blob || await store.getBlob(key);
   if (b) await store.putBlob(newKey, b);
   return newKey;
 }
@@ -166,7 +166,9 @@ async function copyPage(p, nb) {
   delete q.updatedAt;
   q.strokes = (q.strokes || []).map(s => ({ ...s, id: uid() }));
   q.texts = (q.texts || []).map(t => ({ ...t, id: uid() }));
-  if (q.bg) q.bg = await copyBlob(p.bg, 'bg_' + q.id);
+  // PDF-Seite, deren Bild nur auf dem Gerät liegt (page.pdf): Die neue Notiz bekommt ein eigenes, abgeglichenes Bild –
+  // das Original-PDF gehört weiter allein zur alten Notiz und kann mit ihr gelöscht werden
+  if (q.bg) { q.bg = await copyBlob(p.bg, 'bg_' + q.id, p.pdf ? await bgBlob(p) : null); delete q.pdf; }
   const images = [];
   for (const im of q.images || []) images.push({ ...im, key: await copyBlob(im.key, 'img_' + uid()) });
   q.images = images;
@@ -209,7 +211,7 @@ export async function mergeNotes(a, b, onProgress = () => {}) {
     const out = [];
     for (const p of pages) {
       onProgress(`Folien vergleichen: ${++done} von ${total}`, (0.6 * done) / total);
-      const s = slideOf(p), blob = s && (await store.getBlob(s.key));
+      const s = slideOf(p), blob = s && (s.key === p.bg ? await bgBlob(p) : await store.getBlob(s.key));
       let fp = null;
       try { fp = blob ? await fingerprint(blob) : null; } catch (err) { console.warn('Folie', p.id, err); }
       out.push(fp && { fp, aspect: s.w / s.h });
@@ -220,7 +222,7 @@ export async function mergeNotes(a, b, onProgress = () => {}) {
   const plan = align(pa.length, pb.length, candidates(ra, rb));
 
   const nb = Object.assign(newNotebook({ title: a.title + ' (zusammengeführt)', folderId: a.folderId ?? null, template: a.template || 'blank', color: a.color }),
-    { kind: a.kind === 'onenote' && b.kind === 'onenote' ? 'onenote' : 'pdf', thumb: a.thumb || b.thumb || null, order: a.order });
+    { kind: a.kind === 'onenote' && b.kind === 'onenote' ? 'onenote' : 'pdf', order: a.order });
   let both = 0, onlyA = 0, onlyB = 0;
   const pages = [];
   for (const [n, { a: i, b: j }] of plan.entries()) {

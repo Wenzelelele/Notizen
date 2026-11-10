@@ -55,7 +55,7 @@ svg { display: block; }
   border: 0; border-radius: 10px; background: transparent; cursor: pointer;
 }
 .ibtn svg { width: 22px; height: 22px; }
-.ibtn:hover { background: var(--panel2); }
+@media (hover: hover) { .ibtn:hover { background: var(--panel2); } }
 .ibtn.on { background: var(--accent-soft); color: var(--accent); }
 .ibtn:disabled { opacity: .3; cursor: default; background: transparent; }
 .ibtn.sm { width: 32px; height: 32px; }
@@ -69,6 +69,21 @@ svg { display: block; }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .btn.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
 .btn.block { display: flex; justify-content: center; width: 100%; margin-top: 6px; }
+/* Gedrückt-Zustand: Am iPad gibt es kein Hover – ohne ihn reagieren Knöpfe gar nicht sichtbar auf den Finger */
+.ibtn:active, .size:active, .mode:active, .ed-title:active, .crumbs button:active, .tree-item:active,
+.selmenu button:active, .menu > button:active, .lp-subj:active, .fopen:active, .thumb:active { background: var(--panel2); }
+.ibtn.on:active, .size.on:active, .mode.on:active { background: var(--accent-soft); filter: brightness(.94); }
+.btn:active, .swatch:active, .segc button:active, .zoom-label:active, .page-btn:active { filter: brightness(.9); }
+.btn:active { transform: scale(.98); }
+.cover-btn:active .cover, .fc-face:active { transform: scale(.97); filter: brightness(.95); }
+.ibtn:disabled:active { background: transparent; }
+[hidden] { display: none !important; }
+/* Laufbalken am oberen Rand, solange ein Ansichtswechsel dauert (main.js) */
+body.routing::after {
+  content: ''; position: fixed; z-index: 300; left: 0; top: 0; height: 3px; width: 40%;
+  background: var(--accent); border-radius: 0 3px 3px 0; animation: routing 1s ease-in-out infinite;
+}
+@keyframes routing { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
 
 /* ---------- Bibliothek ---------- */
 .lib {
@@ -96,7 +111,7 @@ svg { display: block; }
   background: var(--c, #2f6fed); border-radius: 5px 12px 12px 5px; box-shadow: var(--shadow);
   transition: transform .15s;
 }
-.cover-btn:hover .cover { transform: translateY(-2px); }
+@media (hover: hover) { .cover-btn:hover .cover { transform: translateY(-2px); } }
 .cover::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 11px; background: rgba(0, 0, 0, .16); }
 .cover .label {
   position: absolute; left: 22px; right: 12px; top: 22px;
@@ -120,10 +135,27 @@ svg { display: block; }
 .head-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 .crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; margin: 8px 0 0; font-size: 14px; color: var(--muted); }
 .crumbs button { border: 0; background: transparent; color: var(--accent); padding: 4px 6px; border-radius: 6px; cursor: pointer; }
-.crumbs button:hover { background: var(--panel2); }
+@media (hover: hover) { .crumbs button:hover { background: var(--panel2); } }
 .crumbs .cur { color: var(--text); font-weight: 600; padding: 4px 6px; }
 .sec-title { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 26px 0 10px; }
-.lib > section:first-of-type .sec-title, .lib > section:first-of-type .grid { margin-top: 18px; }
+.lib-body > section:first-of-type .sec-title, .lib-body > section:first-of-type > .grid:first-child { margin-top: 18px; }
+/* Suche */
+.lib-search { position: relative; margin-top: 14px; }
+.lib-search > svg { position: absolute; left: 12px; top: 50%; width: 18px; height: 18px; margin-top: -9px; color: var(--muted); pointer-events: none; }
+.lib-search .input { padding-left: 38px; padding-right: 40px; background: var(--panel); -webkit-appearance: none; appearance: none; }
+.lib-search .input::-webkit-search-cancel-button { display: none; }
+.lib-search .ibtn { position: absolute; right: 4px; top: 50%; margin-top: -16px; display: none; }
+.lib-search.has .ibtn { display: inline-grid; }
+/* Hinweis zum Abgleich */
+.lib-banner { display: flex; align-items: center; gap: 12px; margin-top: 12px; padding: 10px 14px; border-radius: 12px; background: var(--accent-soft); font-size: 14px; }
+.lib-banner.err { background: color-mix(in srgb, var(--danger) 14%, var(--panel)); }
+.lib-banner .btn { flex: none; }
+/* Zuletzt geöffnet: eine Zeile zum Durchwischen */
+.grid.recent { display: flex; gap: 18px; overflow-x: auto; padding: 4px 2px 8px; scrollbar-width: none; }
+.grid.recent::-webkit-scrollbar { display: none; }
+.grid.recent .nb-card { flex: 0 0 118px; min-width: 0; }
+/* Vorschaubild noch nicht geladen: leeres Blatt statt Bild-Platzhalter */
+img[data-cover]:not([src]) { visibility: hidden; }
 .fgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
 .fcard { display: flex; align-items: center; gap: 2px; padding-right: 4px; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; }
 .fopen { display: flex; align-items: center; gap: 12px; flex: 1; min-width: 0; padding: 10px 12px; border: 0; background: transparent; text-align: left; cursor: pointer; }
@@ -198,7 +230,7 @@ svg { display: block; }
   padding: 6px 8px; border-radius: 8px; max-width: 40vw;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.ed-title:hover { background: var(--panel2); }
+@media (hover: hover) { .ed-title:hover { background: var(--panel2); } }
 .page-label { font-size: 13px; color: var(--muted); padding: 0 8px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .zoom-label { border: 0; background: transparent; font-size: 13px; color: var(--muted); min-width: 48px; cursor: pointer; font-variant-numeric: tabular-nums; }
 .seg { display: flex; gap: 2px; flex: none; }
@@ -216,7 +248,7 @@ svg { display: block; }
 .size.on { background: var(--accent-soft); color: var(--accent); }
 .size i { display: block; border-radius: 50%; box-shadow: 0 0 0 1px rgba(127, 127, 127, .55); }
 .mode { height: 36px; padding: 0 10px; flex: none; border: 0; border-radius: 8px; background: transparent; color: inherit; font: inherit; font-size: 14px; white-space: nowrap; cursor: pointer; }
-.mode:hover { background: var(--panel2); }
+@media (hover: hover) { .mode:hover { background: var(--panel2); } }
 .mode.on { background: var(--accent-soft); color: var(--accent); }
 
 .stage { position: relative; flex: 1; min-height: 0; min-width: 0; background: var(--desk); }
@@ -248,7 +280,7 @@ svg { display: block; }
 /* während der Zwei-Finger-Geste skaliert nur die Grafikkarte (siehe pinchMove in editor.js) */
 .pages.pinching { will-change: transform; }
 .page {
-  position: relative; flex: none; background: #fff;
+  position: relative; flex: none; background: #fff; /* Papier (Farbe, Linien) setzt editor.js als Hintergrund */
   box-shadow: 0 1px 3px rgba(0, 0, 0, .14), 0 6px 22px rgba(0, 0, 0, .08);
   touch-action: none;
 }
@@ -271,10 +303,16 @@ svg { display: block; }
   display: grid; place-items: center; border: 0; border-radius: 8px; cursor: pointer;
   background: rgba(120, 120, 130, .12); color: #555; opacity: .55;
 }
-.page-btn:hover { opacity: 1; }
+@media (hover: hover) { .page-btn:hover { opacity: 1; } }
 .page-btn svg { width: 18px; height: 18px; }
 .page-num { position: absolute; left: 0; right: 0; bottom: -22px; text-align: center; font-size: 11px; color: var(--muted); }
 .pages.tight .page-num { display: none; } /* Seitenabstand zu klein (stark verkleinert), siehe layoutAll */
+/* Seite ist noch nicht auf diesem Gerät (kommt per Sync) */
+.page-missing { display: none; }
+.page.missing { background: repeating-linear-gradient(135deg, #f3f4f7 0 14px, #eceef2 14px 28px) !important; }
+.page.missing .page-missing { display: grid; place-items: center; position: absolute; inset: 0; color: #6b7080; font-size: 15px; }
+.page.missing .page-btn { display: none; }
+.sync-warn { color: var(--danger); }
 .overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .selbox { position: absolute; z-index: 3; pointer-events: none; border: 1.5px dashed var(--accent); border-radius: 4px; background: rgba(47, 111, 237, .05); }
 .selmenu {
@@ -282,7 +320,11 @@ svg { display: block; }
   background: var(--panel); color: var(--text); border-radius: 10px; box-shadow: var(--shadow);
 }
 .selmenu button { border: 0; background: transparent; padding: 7px 11px; border-radius: 7px; font-size: 13px; white-space: nowrap; cursor: pointer; }
-.selmenu button:hover { background: var(--panel2); }
+/* Eckgriffe der Auswahl: ziehen ändert die Größe. Großer Berührbereich, kleiner sichtbarer Punkt */
+.selhandle { position: absolute; z-index: 6; width: 30px; height: 30px; margin: -15px 0 0 -15px; touch-action: none; cursor: nwse-resize; }
+.selhandle.ne, .selhandle.sw { cursor: nesw-resize; }
+.selhandle::after { content: ''; position: absolute; inset: 9px; border-radius: 50%; background: #fff; border: 2px solid var(--accent); box-shadow: 0 1px 3px rgba(0, 0, 0, .25); }
+@media (hover: hover) { .selmenu button:hover { background: var(--panel2); } }
 
 /* ---------- Menüs & Dialoge ---------- */
 .menu {
@@ -293,7 +335,7 @@ svg { display: block; }
   display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
   border: 0; background: transparent; padding: 9px 10px; border-radius: 8px; font-size: 14px; cursor: pointer;
 }
-.menu > button:hover { background: var(--panel2); }
+@media (hover: hover) { .menu > button:hover { background: var(--panel2); } }
 .menu > button svg, .mi-space { width: 18px; height: 18px; flex: none; }
 .menu .danger { color: var(--danger); }
 .menu .hdr { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; padding: 8px 10px 4px; }
@@ -375,7 +417,7 @@ svg { display: block; }
 .lp-day.now .lp-bar i { opacity: 1; }
 .lp-subjects { display: flex; flex-direction: column; margin-top: 12px; border-top: 1px solid var(--line); }
 .lp-subj { display: flex; align-items: center; gap: 10px; padding: 9px 2px; border: 0; border-bottom: 1px solid var(--line); background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
-.lp-subj:hover { background: var(--panel2); }
+@media (hover: hover) { .lp-subj:hover { background: var(--panel2); } }
 .lp-subj .grow { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lp-subj .badge { min-width: 20px; padding: 1px 7px; border-radius: 999px; background: var(--accent); color: #fff; font-size: 12px; font-weight: 700; text-align: center; }
 .lp-subjects .linkbtn { align-self: flex-start; margin-top: 8px; font-size: 13px; }

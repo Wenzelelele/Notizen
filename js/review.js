@@ -19,17 +19,20 @@ export async function showReview(root, folderId) {
     ...cards.filter(c => c.srs.state === 'new').sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0)).slice(0, NEW_PER_SESSION),
   ];
   const total = queue.length;
-  let done = 0, again = 0, current = null, revealed = false, alive = true;
+  let done = 0, again = 0, current = null, revealed = false, alive = true, busy = false;
+  let last = null; // letzte Bewertung, zum Zurücknehmen: { card, srs (vorher), requeued, done, again }
 
   const progressEl = h('span', { class: 'page-label' });
   const cardEl = h('div', { class: 'rv-card' });
   const footEl = h('div', { class: 'rv-foot' });
   const back = () => { location.hash = ''; };
+  const undoBtn = h('button', { class: 'ibtn', title: 'Letzte Bewertung zurücknehmen', 'aria-label': 'Letzte Bewertung zurücknehmen', onclick: () => undoGrade() }, icon('undo'));
+  undoBtn.disabled = true;
   const wrap = h('div', { class: 'review' },
     h('header', { class: 'ed-top' },
       h('button', { class: 'ibtn', title: 'Zurück', 'aria-label': 'Zurück', onclick: back }, icon('back')),
       h('div', { class: 'ed-title' }, 'Lernen' + (folder ? ': ' + folder.name : '')),
-      h('div', { class: 'grow' }), progressEl,
+      h('div', { class: 'grow' }), progressEl, undoBtn,
       h('button', { class: 'ibtn', title: 'Karte bearbeiten', 'aria-label': 'Karte bearbeiten', onclick: () => current && open(current.id, !!current.occl) }, icon('edit'))),
     h('div', { class: 'rv-body' }, cardEl), footEl);
   root.replaceChildren(wrap);
@@ -41,6 +44,7 @@ export async function showReview(root, folderId) {
   }
 
   const sideWidth = () => Math.min(cardEl.clientWidth || 600, 900);
+  const blank = () => h('p', {}, '(leer)');
   async function side(page) {
     const w = sideWidth(), dpr = window.devicePixelRatio || 1;
     const c = await renderPage(page, { scale: (w * dpr) / page.w });
@@ -49,10 +53,44 @@ export async function showReview(root, folderId) {
     return c;
   }
   // Abdeck-Karte: dasselbe Bild, einmal mit verdecktem und einmal mit aufgedecktem Bereich
-  async function occlSide(card, reveal) {
-    const c = await renderOcclusion(card.occl, { reveal, width: sideWidth(), dpr: window.devicePixelRatio || 1, bitmap: card.__bmp });
+  async function occlSide(card, bitmap, reveal) {
+    const c = await renderOcclusion(card.occl, { reveal, width: sideWidth(), dpr: window.devicePixelRatio || 1, bitmap });
     c.className = 'rv-side';
     return c;
+  }
+
+  // Seiten im Voraus zeichnen: die Rückseite der aktuellen Karte (während man über die Frage nachdenkt) und die
+  // Vorderseite der nächsten. So wechselt die Karte ohne Wartezeit und ohne „Wird geladen …“ dazwischen.
+  const prep = new Map(); // Karten-id → { front, back?, makeBack(), close() }
+  function prepare(card, withBack) {
+    let e = prep.get(card.id);
+    if (!e) {
+      if (card.occl) {
+        const bmp = loadOcclusionImage(card.occl);
+        e = {
+          front: bmp.then(b => occlSide(card, b, false)),
+          makeBack: () => bmp.then(b => occlSide(card, b, true)),
+          close: () => bmp.then(b => b?.close?.()).catch(() => {}),
+        };
+      } else {
+        const pages = store.pagesOf(card);
+        e = {
+          front: pages.then(ps => (ps[0] ? side(ps[0]) : blank())),
+          makeBack: () => pages.then(ps => (ps[1] ? side(ps[1]) : blank())),
+          close: () => {},
+        };
+      }
+      e.front.catch(() => {}); // Fehler meldet show()
+      prep.set(card.id, e);
+    }
+    if (withBack && !e.back) { e.back = e.front.then(() => e.makeBack()); e.back.catch(() => {}); } // erst die Frage, dann die Antwort
+    return e;
+  }
+  function discard(id) {
+    const e = prep.get(id);
+    if (!e) return;
+    prep.delete(id);
+    Promise.allSettled([e.front, e.back]).then(() => e.close()); // Bild erst freigeben, wenn nichts mehr daran zeichnet
   }
 
   async function show() {
@@ -61,29 +99,33 @@ export async function showReview(root, folderId) {
     current = queue.shift();
     revealed = false;
     if (!current) return finish();
-    cardEl.replaceChildren(h('div', { class: 'muted small' }, 'Wird geladen …'));
-    if (current.occl) current.__bmp = await loadOcclusionImage(current.occl);
-    const pages = current.occl ? [] : await store.pagesOf(current);
-    const front = current.occl ? await occlSide(current, false) : pages[0] ? await side(pages[0]) : h('p', {}, '(leer)');
-    if (!alive) { current.__bmp?.close?.(); delete current.__bmp; return; } // Lernmodus inzwischen verlassen
-    const src = current.source?.noteId;
-    cardEl.replaceChildren(h('div', { class: 'rv-label' }, current.occl ? 'Was ist hier verdeckt?' : 'Frage'), front);
+    const c = current, e = prepare(c, true);
+    for (const b of footEl.querySelectorAll('button')) b.disabled = true; // Knöpfe der vorigen Karte
+    // Hinweis nur, wenn es wirklich dauert (sonst flackert er bei jedem Kartenwechsel)
+    const wait = setTimeout(() => { if (alive && current === c) cardEl.replaceChildren(h('div', { class: 'muted small' }, 'Wird geladen …')); }, 300);
+    let front;
+    try { front = await e.front; } catch (err) { console.error(err); front = h('p', {}, 'Diese Karte konnte nicht geladen werden.'); }
+    clearTimeout(wait);
+    if (!alive || current !== c) return; // Lernmodus verlassen oder Bewertung zurückgenommen
+    const src = c.source?.noteId;
+    cardEl.replaceChildren(h('div', { class: 'rv-label' }, c.occl ? 'Was ist hier verdeckt?' : 'Frage'), front);
+    cardEl.parentElement.scrollTop = 0;
     footEl.replaceChildren(
       src ? h('button', { class: 'btn', onclick: () => open(src) }, icon('book'), 'Im Skript zeigen') : null,
       h('button', { class: 'btn primary rv-show', onclick: reveal }, 'Antwort zeigen'));
-    current.__pages = pages;
+    if (queue[0]) prepare(queue[0], false);
   }
 
   async function reveal() {
     if (!current || revealed) return;
     revealed = true;
-    if (current.occl) { // Bereich aufdecken (an derselben Stelle)
-      cardEl.replaceChildren(h('div', { class: 'rv-label' }, 'Antwort'), await occlSide(current, true));
-    } else {
-      const page = current.__pages[1];
-      cardEl.append(h('div', { class: 'rv-label' }, 'Antwort'), page ? await side(page) : h('p', {}, '(leer)'));
-    }
-    const options = preview(current.srs);
+    const c = current;
+    let answer;
+    try { answer = await prepare(c, true).back; } catch (err) { console.error(err); answer = h('p', {}, 'Die Antwort konnte nicht geladen werden.'); }
+    if (!alive || current !== c) return;
+    if (c.occl) cardEl.replaceChildren(h('div', { class: 'rv-label' }, 'Antwort'), answer); // Bereich aufdecken (an derselben Stelle)
+    else cardEl.append(h('div', { class: 'rv-label' }, 'Antwort'), answer);
+    const options = preview(c.srs);
     footEl.replaceChildren(...GRADES.map(([g, label]) =>
       h('button', { class: 'btn rv-grade g' + g, onclick: () => grade(g, options[g - 1]) },
         h('b', {}, label), h('span', { class: 'small' }, fmtInterval(options[g - 1].due - Date.now())))));
@@ -92,14 +134,37 @@ export async function showReview(root, folderId) {
 
   async function grade(g, srs) {
     const c = current;
-    delete c.__pages;
-    c.__bmp?.close?.();
-    delete c.__bmp;
-    c.srs = srs;
-    await store.put('notebooks', c);
-    if (g === 1) again++;
-    if (srs.due - Date.now() < SOON) queue.push(c); // kommt in dieser Runde nochmal
-    else done++;
+    if (!c || busy) return;
+    busy = true;
+    try {
+      last = { card: c, srs: c.srs, requeued: false, done, again };
+      c.srs = srs;
+      await store.put('notebooks', c);
+      if (g === 1) again++;
+      if (srs.due - Date.now() < SOON) { queue.push(c); last.requeued = true; } // kommt in dieser Runde nochmal
+      else { done++; discard(c.id); }
+      undoBtn.disabled = false;
+    } finally { busy = false; }
+    show();
+  }
+
+  // Verdrückt? Die letzte Bewertung zurücknehmen: Die Karte bekommt ihren Lernstand von vorher und wird nochmal gezeigt.
+  async function undoGrade() {
+    if (!last || busy) return;
+    busy = true;
+    const u = last;
+    last = null;
+    undoBtn.disabled = true;
+    try {
+      u.card.srs = u.srs;
+      await store.put('notebooks', u.card);
+      if (u.requeued) { const i = queue.lastIndexOf(u.card); if (i >= 0) queue.splice(i, 1); }
+      done = u.done;
+      again = u.again;
+      if (current && current !== u.card) queue.unshift(current); // die gerade gezeigte Karte kommt danach
+      queue.unshift(u.card);
+    } finally { busy = false; }
+    toast('Bewertung zurückgenommen');
     show();
   }
 
@@ -119,7 +184,8 @@ export async function showReview(root, folderId) {
 
   function onKey(e) {
     if (e.target.matches?.('input, textarea')) return;
-    if (!revealed && (e.key === ' ' || e.key === 'Enter')) { e.preventDefault(); reveal(); }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); undoGrade(); }
+    else if (!revealed && (e.key === ' ' || e.key === 'Enter')) { e.preventDefault(); reveal(); }
     else if (revealed && /^[1-4]$/.test(e.key)) footEl.querySelectorAll('.rv-grade')[+e.key - 1]?.click();
   }
   addEventListener('keydown', onKey);
@@ -127,5 +193,9 @@ export async function showReview(root, folderId) {
 
   if (!total && cards.length) toast('Gerade sind keine Karten fällig.');
   show();
-  return () => { alive = false; removeEventListener('keydown', onKey); };
+  return () => {
+    alive = false;
+    removeEventListener('keydown', onKey);
+    for (const id of [...prep.keys()]) discard(id);
+  };
 }

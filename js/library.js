@@ -3,7 +3,8 @@ import { store, uid, newNotebook, newPage, exportBackup, importBackup } from './
 import { h, icon, menu, modal, confirmDialog, promptText, toast, progress, pickFiles, download, seg, field, safeName } from './ui.js';
 import { importPdf, exportPdf } from './pdfio.js';
 import { loadIndex, importPage, hid } from './onenote.js';
-import { syncDialog, syncEvents, syncStatus } from './sync.js';
+import { syncDialog, syncEvents, syncStatus, syncProblem } from './sync.js';
+import { hasCover, cachedCover, loadCover, pauseCovers, adoptThumbs, coverEvents } from './covers.js';
 import { cloudConfigured, currentUser } from './cloud.js';
 
 // Die gerade sichtbare Bibliothek aktualisieren, wenn der Sync etwas geholt hat bzw. sich sein Status ändert
@@ -24,6 +25,10 @@ import { mergeDialog } from './merge.js';
 
 const COVERS = ['#2f6fed', '#e0533d', '#2e9e6b', '#8a55d6', '#f0a020', '#3b4252', '#d94d8a', '#1a9bb0'];
 const FOLDER_KEY = 'notizen.folder';
+const RECENT_KEY = 'notizen.recent'; // zuletzt geöffnete Notizen (setzt der Editor)
+const scrollPos = new Map();         // Ordner → Scrollposition, damit man nach einer Notiz wieder dort landet
+// Suche: Groß-/Kleinschreibung und Akzente egal
+const norm = s => (s || '').toLocaleLowerCase('de').normalize('NFD').replace(/[̀-ͯ]/g, '');
 
 const fmtDate = ts => new Date(ts || Date.now()).toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' });
 const clean = s => (s || '').replace(/\s+/g, ' ').trim();
@@ -33,18 +38,37 @@ export async function showLibrary(root) {
   let folders = [], notebooks = [];
   let current = null; // geöffneter Ordner (id) oder null = oberste Ebene
   try { current = localStorage.getItem(FOLDER_KEY) || null; } catch { /* egal */ }
-  const wrap = h('div', { class: 'lib' });
+  // Kopf (Titel, Knöpfe, Pfad), Suchfeld und Inhalt sind getrennt: Beim Tippen wird nur der Inhalt neu aufgebaut –
+  // das Suchfeld bleibt stehen und behält die Tastatur.
+  let query = '';
+  const headEl = h('div', { class: 'lib-top' });
+  const searchInput = h('input', { class: 'input', type: 'search', placeholder: 'Notizen und Ordner suchen', 'aria-label': 'Suchen', enterkeyhint: 'search', autocomplete: 'off',
+    oninput: e => { query = e.target.value; searchEl.classList.toggle('has', !!query); renderBody(); wrap.scrollTop = 0; } });
+  const searchEl = h('div', { class: 'lib-search' }, icon('search'), searchInput,
+    h('button', { class: 'ibtn sm', type: 'button', title: 'Suche leeren', 'aria-label': 'Suche leeren', onclick: () => { clearSearch(); renderBody(); searchInput.focus(); } }, icon('close')));
+  const bodyEl = h('div', { class: 'lib-body' });
+  const wrap = h('div', { class: 'lib' }, headEl, searchEl, bodyEl);
   root.replaceChildren(wrap);
+  function clearSearch() { query = ''; searchInput.value = ''; searchEl.classList.remove('has'); }
 
   // ---------- Ordnerbaum ----------
-  const byId = id => folders.find(f => f.id === id);
-  const parentOf = f => (f.parentId && byId(f.parentId) ? f.parentId : null);
-  const subfolders = id => folders.filter(f => parentOf(f) === id);
-  const folderOf = n => (n.folderId && byId(n.folderId) ? n.folderId : null);
-  const notesIn = id => notebooks.filter(n => !isCard(n) && folderOf(n) === id);
-  const cardsIn = id => notebooks.filter(n => isCard(n) && folderOf(n) === id);
+  // Nachschlage-Tabellen statt bei jeder Frage alle Ordner/Notizen durchzugehen (index() läuft vor jedem Aufbau)
+  let fmap = new Map(), kids = new Map(), notesBy = new Map(), cardsBy = new Map();
+  function index() {
+    fmap = new Map(folders.map(f => [f.id, f]));
+    kids = new Map(); notesBy = new Map(); cardsBy = new Map();
+    const add = (m, k, v) => { const l = m.get(k); if (l) l.push(v); else m.set(k, [v]); };
+    for (const f of folders) add(kids, parentOf(f), f);
+    for (const nb of notebooks) add(isCard(nb) ? cardsBy : notesBy, folderOf(nb), nb);
+  }
+  const byId = id => fmap.get(id);
+  const parentOf = f => (f.parentId && fmap.has(f.parentId) ? f.parentId : null);
+  const subfolders = id => [...(kids.get(id) || [])];
+  const folderOf = n => (n.folderId && fmap.has(n.folderId) ? n.folderId : null);
+  const notesIn = id => [...(notesBy.get(id) || [])];
+  const cardsIn = id => [...(cardsBy.get(id) || [])];
   // Karteikarten im ganzen Teilbaum (null = alle) und wie viele davon jetzt dran sind (fällig + neu)
-  const cardsUnder = id => { const ids = id ? new Set(descendants(id)) : null; return notebooks.filter(n => isCard(n) && (!ids || ids.has(folderOf(n)))); };
+  const cardsUnder = id => (id ? descendants(id).flatMap(cardsIn) : notebooks.filter(isCard));
   const dueCount = list => { const now = Date.now(); return list.filter(c => c.srs.state === 'new' || c.srs.due <= now).length; };
   const pathTo = id => {
     const p = [];
@@ -60,33 +84,81 @@ export async function showLibrary(root) {
   const byDate = (a, b) => (b.updatedAt || 0) - (a.updatedAt || 0);
   const byName = (a, b) => a.name.localeCompare(b.name, 'de');
 
-  function go(id) {
+  // back: zu einem übergeordneten Ordner zurück → dort weitermachen, wo man war; sonst oben anfangen
+  function go(id, back = false) {
+    scrollPos.set(current || '', wrap.scrollTop);
     current = id || null;
     try { current ? localStorage.setItem(FOLDER_KEY, current) : localStorage.removeItem(FOLDER_KEY); } catch { /* egal */ }
+    clearSearch();
     render();
-    wrap.scrollTop = 0;
+    wrap.scrollTop = back ? scrollPos.get(current || '') || 0 : 0;
   }
   async function reload() {
     [folders, notebooks] = await Promise.all([store.getAll('folders'), store.getAll('notebooks')]);
     // Karteikarten gehören in den Karteikarten-Ordner des Fachs (auch ältere oder von Claude angelegte)
     if (await tidyCards(folders, notebooks)) folders = await store.getAll('folders');
+    // alte Vorschaubilder aus den Datensätzen in den Gerätespeicher umziehen (covers.js)
+    await adoptThumbs(notebooks).catch(err => console.warn('Vorschaubilder', err));
+    index();
     if (current && !byId(current)) current = null;
     render();
   }
 
+  // ---------- Vorschaubilder: erst laden, wenn die Karte in Sichtweite kommt ----------
+  const coverNbs = new Map(); // Notiz-id → Notiz der gerade angezeigten Bilder
+  let coverIO = null;
+  function coverImg(nb) {
+    const img = h('img', { alt: '', decoding: 'async', draggable: 'false', 'data-cover': nb.id });
+    const url = cachedCover(nb); // schon in dieser Sitzung geladen: gleich zeigen, damit beim Neuaufbau nichts flackert
+    if (url) img.src = url;
+    coverNbs.set(nb.id, nb);
+    return img;
+  }
+  function watchCovers() {
+    coverIO?.disconnect();
+    coverIO = new IntersectionObserver(entries => {
+      for (const en of entries) {
+        if (!en.isIntersecting) continue;
+        coverIO.unobserve(en.target);
+        const img = en.target, nb = coverNbs.get(img.dataset.cover);
+        if (nb) loadCover(nb).then(url => { if (url && img.isConnected && img.getAttribute('src') !== url) img.src = url; }).catch(() => {});
+      }
+    }, { root: wrap, rootMargin: '400px 0px' });
+    for (const img of bodyEl.querySelectorAll('img[data-cover]')) coverIO.observe(img);
+  }
+  const onCover = e => { // neu gezeichnetes Bild (z. B. nach dem Schließen einer Notiz) austauschen
+    for (const img of bodyEl.querySelectorAll('img[data-cover]')) if (img.dataset.cover === e.detail.id) img.src = e.detail.url;
+  };
+  coverEvents.addEventListener('cover', onCover);
+
+  // Hinweis, wenn der Cloud-Abgleich gerade nicht läuft (abgemeldet, wiederholter Fehler)
+  const bannerEl = h('div', { class: 'lib-banner-host' });
+  function drawBanner() {
+    const pr = syncProblem();
+    bannerEl.replaceChildren(...(pr ? [h('div', { class: 'lib-banner' + (pr.kind === 'error' ? ' err' : '') },
+      h('span', { class: 'grow' }, pr.text),
+      h('button', { class: 'btn sm', type: 'button', onclick: () => syncDialog(reload) }, pr.action))] : []));
+  }
+
+  function recentNotes() {
+    let ids = [];
+    try { ids = JSON.parse(localStorage.getItem(RECENT_KEY) || '[]'); } catch { /* egal */ }
+    const all = new Map(notebooks.map(nb => [nb.id, nb]));
+    return ids.map(id => all.get(id)).filter(nb => nb && !isCard(nb)).slice(0, 6);
+  }
+  const folderPath = id => pathTo(id).map(f => f.name).join(' › ');
+
   function render() {
+    index();
     const path = pathTo(current);
     const here = path[path.length - 1] || null;
     const cardsHere = isCardFolder(here); // im Karteikarten-Ordner eines Fachs
-    const subs = subfolders(current).sort((a, b) => isCardFolder(b) - isCardFolder(a) || byOrder(a, b) || byName(a, b));
-    // in Ordnern: importierte OneNote-Seiten in OneNote-Reihenfolge, eigene Notizen davor
-    const notes = notesIn(current).sort(current ? (a, b) => byOrder(a, b) || byDate(a, b) : byDate);
-    const flash = cardsIn(current).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
     const learnable = cardsUnder(current), due = dueCount(learnable);
     syncBtn = syncButton();
-    const parts = [
+    drawBanner();
+    headEl.replaceChildren(...[
       h('header', { class: 'lib-head' },
-        here ? h('button', { class: 'ibtn', title: 'Zurück', 'aria-label': 'Zurück', onclick: () => go(parentOf(here)) }, icon('back')) : null,
+        here ? h('button', { class: 'ibtn', title: 'Zurück', 'aria-label': 'Zurück', onclick: () => go(parentOf(here), true) }, icon('back')) : null,
         h('h1', {}, here ? here.name : 'Notizen'),
         h('div', { class: 'head-actions' },
         learnable.length ?h('button', { class: 'btn learn-btn' + (due ? ' due' : ''), title: here ? `Karteikarten in „${here.name}“ lernen` : 'Alle fälligen Karteikarten lernen', onclick: () => { location.hash = 'lernen' + (current ? '/' + current : ''); } },
@@ -99,14 +171,53 @@ export async function showLibrary(root) {
         syncBtn,
         h('button', { class: 'ibtn', title: 'Mehr', 'aria-label': 'Mehr', onclick: e => (here ? folderMenu(here, e.currentTarget) : libMenu(e.currentTarget)) }, icon('more')))),
       here ? h('nav', { class: 'crumbs', 'aria-label': 'Ordnerpfad' },
-        h('button', { onclick: () => go(null) }, 'Notizen'),
-        path.map((f, i) => [h('span', { class: 'sep' }, '›'), i === path.length - 1 ? h('span', { class: 'cur' }, f.name) : h('button', { onclick: () => go(f.id) }, f.name)])) : null,
+        h('button', { onclick: () => go(null, true) }, 'Notizen'),
+        path.map((f, i) => [h('span', { class: 'sep' }, '›'), i === path.length - 1 ? h('span', { class: 'cur' }, f.name) : h('button', { onclick: () => go(f.id, true) }, f.name)])) : null,
+      bannerEl].filter(Boolean)); // replaceChildren würde null als Text "null" einfügen
+    renderBody();
+  }
+
+  // Inhalt unter dem Suchfeld: der geöffnete Ordner – oder, solange etwas im Suchfeld steht, die Treffer
+  function renderBody() {
+    coverNbs.clear();
+    const parts = query.trim() ? searchParts() : folderParts();
+    bodyEl.replaceChildren(...parts.filter(Boolean));
+    watchCovers();
+  }
+  function folderParts() {
+    const here = byId(current) || null, cardsHere = isCardFolder(here);
+    const subs = subfolders(current).sort((a, b) => isCardFolder(b) - isCardFolder(a) || byOrder(a, b) || byName(a, b));
+    // in Ordnern: importierte OneNote-Seiten in OneNote-Reihenfolge, eigene Notizen davor
+    const notes = notesIn(current).sort(current ? (a, b) => byOrder(a, b) || byDate(a, b) : byDate);
+    const flash = cardsIn(current).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+    const learnable = cardsUnder(current);
+    // oberste Ebene: schnell zurück zu dem, woran man zuletzt saß (lohnt sich, sobald es Ordner gibt)
+    const recent = !current && subs.length ? recentNotes() : [];
+    return [
       learnable.length && !cardsHere ? learnPanel(learnable) : null,
+      recent.length ? h('section', {}, h('h3', { class: 'sec-title' }, 'Zuletzt geöffnet'),
+        h('div', { class: 'grid recent' }, recent.map(nb => card(nb, folderOf(nb) ? byId(folderOf(nb)).name : '')))) : null,
       subs.length ? h('section', {}, h('h3', { class: 'sec-title' }, 'Ordner'), h('div', { class: 'fgrid' }, subs.map(folderCard))) : null,
       flash.length ? h('section', {}, h('h3', { class: 'sec-title' }, `Karteikarten · ${flash.length}`), h('div', { class: 'cgrid' }, flash.map(flashCard))) : null,
-      notes.length ? h('section', {}, subs.length || flash.length ? h('h3', { class: 'sec-title' }, 'Notizen') : null, h('div', { class: 'grid' }, notes.map(card))) : null,
+      notes.length ? h('section', {}, subs.length || flash.length || recent.length ? h('h3', { class: 'sec-title' }, 'Notizen') : null, h('div', { class: 'grid' }, notes.map(nb => card(nb)))) : null,
       !subs.length && !notes.length && !flash.length ? empty(here) : null];
-    wrap.replaceChildren(...parts.filter(Boolean)); // replaceChildren würde null als Text "null" einfügen
+  }
+  // Suche über alle Ordner: jedes Wort muss im Titel (Notiz) bzw. Namen (Ordner) vorkommen
+  function searchParts() {
+    const words = norm(query).split(/\s+/).filter(Boolean);
+    const hit = t => { const x = norm(t); return words.every(w => x.includes(w)); };
+    const fs = folders.filter(f => !isCardFolder(f) && hit(f.name)).sort(byName);
+    const ns = notebooks.filter(nb => !isCard(nb) && hit(nb.title)).sort(byDate);
+    const MAX = 60;
+    if (!fs.length && !ns.length) {
+      return [h('div', { class: 'empty' }, h('div', { class: 'empty-ico' }, icon('search')), h('h2', {}, 'Nichts gefunden'),
+        h('p', { class: 'muted' }, `Keine Notiz und kein Ordner mit „${query.trim()}“ im Namen.`))];
+    }
+    return [
+      fs.length ? h('section', {}, h('h3', { class: 'sec-title' }, `Ordner · ${fs.length}`), h('div', { class: 'fgrid' }, fs.slice(0, 24).map(folderCard))) : null,
+      ns.length ? h('section', {}, h('h3', { class: 'sec-title' }, `Notizen · ${ns.length}`),
+        h('div', { class: 'grid' }, ns.slice(0, MAX).map(nb => card(nb, folderPath(folderOf(nb)) || 'Oberste Ebene'))),
+        ns.length > MAX ? h('p', { class: 'muted small' }, `Die ersten ${MAX} von ${ns.length} – tipp noch ein Wort dazu.`) : null) : null];
   }
 
   // ---------- Lern-Übersicht: was heute dran ist, je Fach, und die nächsten 7 Tage ----------
@@ -157,6 +268,7 @@ export async function showLibrary(root) {
 
   let syncBtn = null;
   function updateSyncButton() {
+    drawBanner();
     if (!syncBtn?.isConnected) return;
     const b = syncButton();
     syncBtn.replaceWith(b);
@@ -181,10 +293,11 @@ export async function showLibrary(root) {
       h('button', { class: 'ibtn sm', title: 'Optionen', 'aria-label': 'Ordneroptionen', onclick: e => folderMenu(f, e.currentTarget) }, icon('more')));
   }
 
-  function card(nb) {
+  // where: statt Seitenzahl/Datum zeigen, wo die Notiz liegt (Suche, „Zuletzt geöffnet“)
+  function card(nb, where = null) {
     const open = () => { location.hash = 'nb/' + nb.id; };
-    const cover = nb.thumb
-      ? h('div', { class: 'cover doc' }, h('img', { src: nb.thumb, alt: '' }))
+    const cover = hasCover(nb)
+      ? h('div', { class: 'cover doc' }, coverImg(nb))
       : h('div', { class: 'cover', style: { '--c': nb.color } }, h('div', { class: 'label' }, nb.title));
     const n = nb.pageIds.length;
     return h('div', { class: 'nb-card', oncontextmenu: e => { e.preventDefault(); nbMenu(nb, e.currentTarget); } },
@@ -192,7 +305,7 @@ export async function showLibrary(root) {
       h('div', { class: 'nb-meta' },
         h('div', { class: 'grow', onclick: open },
           h('div', { class: 't' }, nb.title),
-          h('div', { class: 's' }, n > 1 ? `${n} Seiten · ${fmtDate(nb.updatedAt)}` : fmtDate(nb.updatedAt))),
+          h('div', { class: 's' }, where != null ? where || fmtDate(nb.updatedAt) : n > 1 ? `${n} Seiten · ${fmtDate(nb.updatedAt)}` : fmtDate(nb.updatedAt))),
         h('button', { class: 'ibtn sm', title: 'Optionen', 'aria-label': 'Optionen', onclick: e => nbMenu(nb, e.currentTarget) }, icon('more'))));
   }
 
@@ -203,7 +316,7 @@ export async function showLibrary(root) {
     const s = nb.srs || newSrs(), now = Date.now();
     const state = s.state === 'new' ? 'neu' : s.due <= now ? 'dran' : 'in ' + fmtInterval(s.due - now);
     return h('div', { class: 'fc-card', oncontextmenu: e => { e.preventDefault(); flashMenu(nb, e.currentTarget); } },
-      h('button', { class: 'fc-face', 'aria-label': 'Karteikarte öffnen', onclick: open }, nb.thumb ? h('img', { src: nb.thumb, alt: '' }) : h('span', { class: 'muted small' }, 'leer')),
+      h('button', { class: 'fc-face', 'aria-label': 'Karteikarte öffnen', onclick: open }, coverImg(nb)),
       h('div', { class: 'nb-meta' },
         h('div', { class: 'grow s' + (s.state === 'new' || s.due <= now ? ' due' : '') }, state),
         h('button', { class: 'ibtn sm', title: 'Optionen', 'aria-label': 'Kartenoptionen', onclick: e => flashMenu(nb, e.currentTarget) }, icon('more'))));
@@ -314,7 +427,7 @@ export async function showLibrary(root) {
         const t = await promptText('Notiz umbenennen', nb.title);
         if (t) { nb.title = t; await store.put('notebooks', nb); render(); }
       } },
-      !nb.thumb && { icon: 'palette', label: 'Cover-Farbe', onClick: () => coverDialog(nb) },
+      !hasCover(nb) && { icon: 'palette', label: 'Cover-Farbe', onClick: () => coverDialog(nb) },
       { icon: 'folder', label: 'In Ordner verschieben', onClick: () => moveDialog(nb) },
       { icon: 'download', label: 'Als PDF exportieren', onClick: () => exportNb(nb) },
       { icon: 'file', label: 'In Seiten aufteilen', onClick: async () => { if (await splitDialog([nb])) await reload(); } },
@@ -562,7 +675,7 @@ export async function showLibrary(root) {
       return (cache[key] = f);
     }
     let done = 0, ok = 0;
-    const tops = new Set();
+    const tops = new Set(), imported = [];
     for (const { n, s, si, p, pi } of jobs) {
       try {
         const top = await ensureFolder('onenote-nb:' + n.name, n.name, null, { color: n.color });
@@ -572,7 +685,7 @@ export async function showLibrary(root) {
         for (let g = 0; g < groups.length; g++) parent = await ensureFolder(`onenote-grp:${n.name}/${groups.slice(0, g + 1).join('/')}`, groups[g], parent.id);
         const sec = await ensureFolder(`onenote-sec:${n.name}/${[...groups, s.name].join('/')}`, s.name, parent.id, { order: si, color: s.color });
         pr.set(`${clean(s.name)} › ${clean(p.title) || 'Ohne Titel'}  (${done + 1} von ${jobs.length})`, done / jobs.length);
-        await importPage(p, { folderId: sec.id, order: pi });
+        imported.push(await importPage(p, { folderId: sec.id, order: pi }));
         ok++;
       } catch (err) {
         console.error(err);
@@ -586,6 +699,9 @@ export async function showLibrary(root) {
     try { current ? localStorage.setItem(FOLDER_KEY, current) : localStorage.removeItem(FOLDER_KEY); } catch { /* egal */ }
     await reload();
     toast(ok === jobs.length ? `${plural(ok, 'Notiz', 'Notizen')} importiert` : `${ok} von ${jobs.length} Notizen importiert`);
+    // OneNote-Seiten sind oft eine einzige riesige „Rolle“. Die wird bei jeder Schreibpause als Ganzes gespeichert und
+    // bei jedem Abgleich als Ganzes hochgeladen – in einzelne Seiten aufgeteilt bleibt beides klein und schnell.
+    if (imported.length && await splitDialog(imported, { quiet: true })) await reload();
   }
 
   async function runImport(files, folderId) {
@@ -637,8 +753,8 @@ export async function showLibrary(root) {
       { icon: 'help', label: 'Über diese App', onClick: () => modal({
         title: 'Notizen',
         body: h('div', { class: 'help' },
-          h('p', {}, 'Deine Notizen werden lokal auf diesem Gerät gespeichert.'),
-          h('p', {}, 'Um Notizen auf ein anderes Gerät zu bringen: ', h('b', {}, 'Backup exportieren'), ' und dort ', h('b', {}, 'wiederherstellen'), '.'),
+          h('p', {}, 'Deine Notizen liegen auf diesem Gerät und funktionieren ohne Internet.'),
+          h('p', {}, 'Mit ', h('b', {}, 'Synchronisieren'), ' (Anmeldung) werden sie über die Cloud mit deinen anderen Geräten abgeglichen. Ohne Cloud: ', h('b', {}, 'Backup exportieren'), ' und auf dem anderen Gerät ', h('b', {}, 'wiederherstellen'), '.'),
           h('p', { class: 'muted small' }, 'Tipp fürs iPad: In Safari „Teilen → Zum Home-Bildschirm“ – dann startet die App im Vollbild.')),
       }) },
     ]);
@@ -646,6 +762,7 @@ export async function showLibrary(root) {
 
   active = { reload, render, status: updateSyncButton };
   await reload();
+  wrap.scrollTop = scrollPos.get(current || '') || 0; // zurück aus einer Notiz: an derselben Stelle weiter
   // PDFs aus dem Teilen-Menü (Kurzbefehl) abholen: gleich, beim Zurückholen der App und jede Minute
   const pollInbox = () => {
     if (document.visibilityState === 'visible') checkInbox().then(n => { if (n && active?.reload === reload) reload(); });
@@ -654,8 +771,12 @@ export async function showLibrary(root) {
   const inboxT = setInterval(pollInbox, 60000);
   document.addEventListener('visibilitychange', pollInbox);
   return () => {
+    scrollPos.set(current || '', wrap.scrollTop);
     clearInterval(inboxT);
     document.removeEventListener('visibilitychange', pollInbox);
+    coverEvents.removeEventListener('cover', onCover);
+    coverIO?.disconnect();
+    pauseCovers();
     if (active?.reload === reload) active = null;
     syncBtn = null;
   };

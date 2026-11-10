@@ -3,12 +3,11 @@
 // Lernstand (FSRS) steht in nb.srs, Herkunft eines Ausschnitts in nb.source.
 import { store, uid, newNotebook } from './store.js';
 import { drawBackground, drawImages, drawInk, drawText } from './ink.js';
-import { loadImage } from './pdfio.js';
+import { loadImage, bgBlob, encodeImage } from './pdfio.js';
 import { newSrs } from './srs.js';
 
 export const CARD_W = 1000, CARD_H = 625;
 export const isCard = nb => nb?.kind === 'card';
-const isEmpty = p => !p || (!p.strokes.length && !p.texts.length && !(p.images || []).length);
 const blankPage = nb => ({ id: uid(), notebookId: nb.id, w: CARD_W, h: CARD_H, template: 'blank', paper: 'white', bg: null, strokes: [], texts: [], images: [] });
 
 // Karteikarten liegen nicht zwischen den Notizen, sondern im Unterordner „Karteikarten“ des jeweiligen
@@ -51,14 +50,11 @@ export async function createCard({ folderId = null, image = null, side = 'back',
     page.h = Math.max(CARD_H, Math.ceil(h + 2 * m));
     const key = 'img_' + uid();
     await store.putBlob(key, image.blob);
-    page.images = [{ id: 'i0', key, x: (CARD_W - w) / 2, y: m, w, h }];
+    page.images = [{ id: 'i0', key, x: (CARD_W - w) / 2, y: m, w, h, free: true }];
   }
   nb.pageIds = [front.id, back.id];
-  await store.put('pages', front);
-  await store.put('pages', back);
-  nb.thumb = await thumbnail([front, back]);
-  await store.put('notebooks', nb);
-  return nb;
+  await store.batch([{ name: 'pages', op: 'put', value: front }, { name: 'pages', op: 'put', value: back }, { name: 'notebooks', op: 'put', value: nb }]);
+  return nb; // das Vorschaubild zeichnet die Bibliothek bei Bedarf (covers.js)
 }
 
 // Seite (oder Ausschnitt) als Canvas zeichnen; fehlende Bilder werden aus dem Speicher geladen.
@@ -73,7 +69,7 @@ export async function renderPage(page, { scale = 1, region = null, loaded = null
   const rect = { x0: r.x, y0: r.y, x1: r.x + r.w, y1: r.y + r.h };
   const imgs = new Map(loaded || []), own = [];
   let bg = null;
-  if (page.bg) { const b = await store.getBlob(page.bg); if (b) { bg = await loadImage(b); own.push(bg); } }
+  if (page.bg) { const b = await bgBlob(page); if (b) { bg = await loadImage(b); own.push(bg); } }
   for (const im of page.images || []) {
     if (imgs.has(im.id) || im.x > rect.x1 || im.x + im.w < rect.x0 || im.y > rect.y1 || im.y + im.h < rect.y0) continue;
     const b = await store.getBlob(im.key);
@@ -87,25 +83,12 @@ export async function renderPage(page, { scale = 1, region = null, loaded = null
   return c;
 }
 
-// Ausschnitt einer Seite als Bild (für "Karte aus Bereich")
-export async function snapshot(page, region, loaded) {
+// Ausschnitt einer Seite als Bild (für "Karte aus Bereich"). jpeg: true, wenn das Ziel nur JPEG versteht
+export async function snapshot(page, region, loaded, { jpeg = false } = {}) {
   const c = await renderPage(page, { scale: Math.min(2, 1600 / region.w), region, loaded });
-  const blob = await new Promise(res => c.toBlob(res, 'image/jpeg', 0.9));
+  const blob = await encodeImage(c, 0.9, 0.9, jpeg);
   c.width = c.height = 0;
   return { blob, w: region.w, h: region.h };
-}
-
-// Vorschaubild: Vorderseite (oder Rückseite, falls vorne noch nichts steht)
-export async function thumbnail(pages) {
-  const p = isEmpty(pages[0]) && pages[1] ? pages[1] : pages[0];
-  if (!p) return null;
-  const c = await renderPage(p, { scale: 320 / p.w, region: { x: 0, y: 0, w: p.w, h: Math.min(p.h, p.w * 0.625) } });
-  return c.toDataURL('image/jpeg', 0.8);
-}
-
-export async function updateThumb(nb) {
-  const thumb = await thumbnail(await store.pagesOf(nb));
-  if (thumb && thumb !== nb.thumb) { nb.thumb = thumb; await store.put('notebooks', nb, { keepTime: true }); }
 }
 
 // ---------- Abdeck-Karten (Image Occlusion) ----------
@@ -173,11 +156,6 @@ export async function renderOcclusion(occl, { reveal = false, width = 600, dpr =
   return c;
 }
 
-export async function occlusionThumb(occl, bitmap) {
-  const c = await renderOcclusion(occl, { width: 320, bitmap });
-  return c.toDataURL('image/jpeg', 0.8);
-}
-
 // Notiz oder Karte löschen. Bei Abdeck-Karten verschwindet ihr Bereich auch aus den übrigen Karten der Gruppe;
 // das Bild wird erst mit der letzten Karte gelöscht.
 export async function deleteCard(nb) {
@@ -185,13 +163,10 @@ export async function deleteCard(nb) {
   if (!nb.occl) return;
   const rest = (await store.getAll('notebooks')).filter(n => n.occl?.group === nb.occl.group);
   if (!rest.length) { await store.delBlob(nb.occl.image.key); return; }
-  const bitmap = await loadOcclusionImage(nb.occl);
-  for (const c of rest) {
+  for (const c of rest) { // ihr Vorschaubild zeichnet die Bibliothek neu (covers.js erkennt die geänderten Bereiche)
     c.occl.masks = c.occl.masks.filter(m => m.id !== nb.occl.target);
-    c.thumb = await occlusionThumb(c.occl, bitmap);
     await store.put('notebooks', c);
   }
-  bitmap?.close?.();
 }
 
 // Ordner-ids eines Teilbaums (inkl. Startordner); null = alles

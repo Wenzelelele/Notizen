@@ -3,7 +3,7 @@
 import { store, uid, newNotebook } from './store.js';
 import { h, icon, toast, seg } from './ui.js';
 import { newSrs } from './srs.js';
-import { loadOcclusionImage, occlusionThumb, MASK, cardFolderFor } from './cards.js';
+import { loadOcclusionImage, MASK, cardFolderFor } from './cards.js';
 
 export const DRAFT_KEY = 'notizen.occlDraft';
 export const NEW_RETURN = 'notizen.return:occl';
@@ -170,8 +170,7 @@ export async function showOcclusion(root, id) {
       const c = byMask.get(m.id) || Object.assign(newNotebook({ title: 'Abdeck-Karte', folderId, template: 'blank', size: 'card' }), { kind: 'card', srs: newSrs(), source });
       c.occl = { ...base, target: m.id };
       c.order = i;
-      c.thumb = await occlusionThumb(c.occl, bitmap);
-      await store.put('notebooks', c);
+      await store.put('notebooks', c); // Vorschaubild: zeichnet die Bibliothek bei Bedarf (covers.js)
     }
     for (const c of group) if (!keep.has(c.occl.target)) await store.del('notebooks', c.id);
     finished = true;

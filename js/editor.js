@@ -2,13 +2,14 @@
 import { store, uid, newPage, changes, PAGE_SIZES } from './store.js';
 import * as ink from './ink.js';
 import { h, icon, menu, modal, confirmDialog, promptText, toast, progress, pickFiles, download, safeName } from './ui.js';
-import { importPdf, exportPdf } from './pdfio.js';
-import { isCard, createCard, snapshot, updateThumb } from './cards.js';
+import { importPdf, exportPdf, bgBlob, loadImage, encodeImage } from './pdfio.js';
+import { isCard, createCard, snapshot } from './cards.js';
+import { makeCover, hasCover, coverPages } from './covers.js';
 import { startOcclusion } from './occlusion.js';
 import { createPageNav } from './pagenav.js';
 import { markForClaude } from './claude.js';
 import { isLongPage, splitDialog } from './split.js';
-import { userActive } from './sync.js';
+import { userActive, syncProblem, syncEvents } from './sync.js';
 
 const PEN_COLORS = ['#1c1c1e', '#1e5bd8', '#d7263d', '#159a4c', '#7b3fbf', '#ff8a00'];
 const HL_COLORS = ['#ffe03a', '#7dff7a', '#62d6ff', '#ff86d6', '#ffb057'];
@@ -39,7 +40,7 @@ const toolEvents = new EventTarget();
 // Seiteninhalt für Rückgängig. Strich- und Textlisten werden nie verändert, sondern immer durch neue ersetzt –
 // ein Verweis genügt also. Kopien kosteten bei großen Seiten (OneNote: 10.000 Striche) viel Speicher, und
 // jede Kopie brauchte beim Rückgängigmachen einen neuen Strich-Index.
-const snap = p => ({ strokes: p.strokes, texts: p.texts });
+const snap = p => ({ strokes: p.strokes, texts: p.texts, images: p.images || [] });
 const r2 = v => Math.round(v * 100) / 100;
 const inside = (b, p, pad = 0) => p.x >= b.x - pad && p.x <= b.x + b.w + pad && p.y >= b.y - pad && p.y <= b.y + b.h + pad;
 
@@ -48,14 +49,30 @@ export async function openEditor(root, nbId, embed = null) {
   const nb = await store.get('notebooks', nbId);
   if (!nb) { if (embed) embed.onClose(); else location.hash = ''; return null; }
   if (nb.occl) { if (!embed) location.replace('#abdecken/' + nbId); return null; } // Abdeck-Karten haben einen eigenen Editor
-  const pages = await store.pagesOf(nb);
+  // Seiten, die (noch) nicht auf diesem Gerät sind – etwa weil ein anderes Gerät sie gerade erst hochlädt –,
+  // bleiben als Platzhalter in der Notiz und füllen sich, sobald der Sync sie bringt (onRemote). Früher fielen
+  // sie aus der Seitenliste, und das nächste Speichern hängte sie auf allen Geräten ab.
+  const [mw, mh] = PAGE_SIZES[nb.size] || PAGE_SIZES.a4p;
+  const pages = (await store.getMany('pages', nb.pageIds || [])).map((p, i) => p
+    || { id: nb.pageIds[i], notebookId: nb.id, w: mw, h: mh, template: 'blank', paper: 'white', bg: null, strokes: [], texts: [], images: [], missing: true });
   if (!pages.length) { const p = newPage(nb); pages.push(p); await store.put('pages', p); }
   nb.pageIds = pages.map(p => p.id);
 
   // k: vorübergehender Zoomfaktor während einer Zwei-Finger-Geste (nur per CSS, siehe pinchMove)
-  const E = { pages, pvs: new Map(), zoom: 1, scale: 1, k: 1, undo: [], redo: [], act: null, cur: null, sel: null, clip: null, dirty: new Set() };
+  // touched: in dieser Sitzung geänderte Seiten (fürs Vorschaubild); unused: Bilddateien, die beim Schließen
+  // gelöscht werden, falls dann keine Seite mehr auf sie zeigt (gelöschte bzw. per Rückgängig entfernte Bilder)
+  const E = { pages, pvs: new Map(), zoom: 1, scale: 1, k: 1, undo: [], redo: [], act: null, cur: null, sel: null, clip: null, dirty: new Set(), touched: new Set(), unused: new Set() };
   const dpr = () => window.devicePixelRatio || 1;
   const card = isCard(nb); // Karteikarte: genau zwei Seiten (Vorder-/Rückseite)
+  // Frei liegende Bilder (selbst eingefügt, Ausschnitte auf Karten) lassen sich mit dem Lasso auswählen, verschieben
+  // und in der Größe ändern. Folien aus OneNote liegen fest – sonst verrutschten sie beim Einkreisen der Handschrift.
+  const isFree = im => card || !!im.free;
+  if (!card && !embed) { // für „Zuletzt geöffnet“ in der Bibliothek
+    try {
+      const rec = JSON.parse(localStorage.getItem('notizen.recent') || '[]').filter(id => id !== nb.id);
+      localStorage.setItem('notizen.recent', JSON.stringify([nb.id, ...rec].slice(0, 8)));
+    } catch { /* egal */ }
+  }
   if (card && !embed && S.tool === 'card') S.tool = 'pen'; // im Kartenfenster wechselt erst der erste Strich (onDown)
   // "Zurück" führt dorthin, woher man kam (z. B. vom Skript zur neuen Karte und wieder zurück)
   const RETURN_KEY = 'notizen.return:' + nb.id;
@@ -74,6 +91,10 @@ export async function openEditor(root, nbId, embed = null) {
   const undoBtn = btn('undo', 'Rückgängig', () => undo());
   const redoBtn = btn('redo', 'Wiederholen', () => redo());
   const zoomLabel = h('button', { class: 'zoom-label', title: 'Zoom zurücksetzen', onclick: () => setZoom(1) }, '100%');
+  // erscheint nur, wenn der Cloud-Abgleich gerade nicht läuft (abgemeldet, Fehler) – sonst merkt man es beim Schreiben nicht
+  const syncWarn = btn('sync', 'Abgleich', () => { const pr = syncProblem(); if (pr) toast(pr.text); }, 'sync-warn');
+  const updSync = () => { const pr = syncProblem(); syncWarn.hidden = !pr; syncWarn.title = pr?.text || ''; };
+  updSync();
   const toolsEl = h('div', { class: 'ed-tools' });
   const pagesEl = h('div', { class: 'pages' });
   // Hülle mit overflow: hidden, damit die CSS-Skalierung beim Zoomen den Scrollbereich nicht verändert
@@ -93,7 +114,7 @@ export async function openEditor(root, nbId, embed = null) {
       : h('header', { class: 'ed-top' },
         btn('back', 'Zurück', goBack),
         card ? null : btn('pages', 'Seitenübersicht', () => toggleNav()),
-        titleEl, h('div', { class: 'grow' }), pageLabel, undoBtn, redoBtn,
+        titleEl, h('div', { class: 'grow' }), syncWarn, pageLabel, undoBtn, redoBtn,
         card ? null : btn('pagePlus', 'Seite hinzufügen', () => addPageAfter(currentIndex())),
         btn('more', 'Mehr', e => moreMenu(e.currentTarget))),
     embed ? null : toolsEl, body);
@@ -167,8 +188,9 @@ export async function openEditor(root, nbId, embed = null) {
     buildTiles(pv);
     pv.texts = h('div', { class: 'texts' });
     pv.num = h('div', { class: 'page-num' });
-    pv.el = h('div', { class: 'page', 'data-id': page.id }, pv.imgLayer, pv.tilesEl, pv.texts,
+    pv.el = h('div', { class: 'page' + (page.missing ? ' missing' : ''), 'data-id': page.id }, pv.imgLayer, pv.tilesEl, pv.texts,
       h('button', { class: 'page-btn', title: 'Seitenoptionen', 'aria-label': 'Seitenoptionen', onclick: e => pageMenu(pv, e.currentTarget) }, icon('more')),
+      h('div', { class: 'page-missing' }, 'Diese Seite wird noch geladen …'),
       pv.num);
     E.pvs.set(page.id, pv);
     return pv;
@@ -374,9 +396,17 @@ export async function openEditor(root, nbId, embed = null) {
     else ink.drawBackground(ctx, pv.page, null, r.y0, r.y1);
     ink.drawInk(ctx, pv.page.strokes, hide, r, t.bs, pv.extra);
   }
-  // „Blanke“ Seite: PDF-Hintergrund oder weißes Blanko-Papier – dann zeichnen die Kacheln nur Handschrift,
-  // alles andere (weiße Seite, PDF, Folien) zeigt der Browser selbst und skaliert es auf der Grafikkarte.
-  const bare = p => !!p.bg || ((!p.paper || p.paper === 'white') && (!p.template || p.template === 'blank'));
+  // Die Kacheln zeichnen nur Handschrift und sind sonst durchsichtig. Alles andere zeigt der Browser selbst und
+  // skaliert es auf der Grafikkarte: das Papier (Farbe, Linien – CSS-Hintergrund der Seite, siehe applyPaper),
+  // darüber PDF-Seite und Bilder. Früher malten Kacheln auf liniertem/farbigem Papier den Hintergrund mit – Bilder
+  // darunter waren dann verdeckt, und jede sichtbare Kachel brauchte ein Canvas, auch eine leere.
+  const bare = () => true;
+  function applyPaper(pv) {
+    const p = pv.page, key = [p.template, p.paper, p.w, p.h, !!p.bg].join('|');
+    if (pv.paperKey === key) return;
+    pv.paperKey = key;
+    pv.el.style.background = ink.backgroundCss(p);
+  }
   function hasInk(t) {
     const r = { x0: t.x0 - 2, y0: t.y0 - 2, x1: t.x1 + 2, y1: t.y1 + 2 };
     return ink.strokesIn(t.pv.page.strokes, r).some(s => {
@@ -447,11 +477,39 @@ export async function openEditor(root, nbId, embed = null) {
     pv.imgLayer.append(el);
     const d = { el, key: a.key, url: null };
     pv.dom.set(a.id, d);
-    store.getBlob(a.key).then(b => {
-      if (!b || pv.dom.get(a.id) !== d || E.dead) return;
+    const wanted = () => pv.dom.get(a.id) === d && !E.dead;
+    // PDF-Seite: Das Bild liegt auf dem Gerät – oder wird jetzt aus dem Original-PDF gezeichnet (pdfio.js)
+    (a.id === BG ? bgBlob(pv.page, wanted) : store.getBlob(a.key)).then(b => {
+      if (!wanted()) return;
+      if (!b) { // PDF noch nicht da (Sync läuft) oder pdf.js gerade nicht ladbar: ein paarmal nachfragen
+        if (a.id === BG && pv.page.pdf && (pv.bgTries = (pv.bgTries || 0) + 1) <= 4) setTimeout(() => { if (wanted()) { dropImg(pv, a.id); syncAssets(pv); } }, 4000);
+        return;
+      }
       d.url = URL.createObjectURL(b);
       el.src = d.url;
     }).catch(err => console.error(err));
+  }
+  // PDF-Seitenbilder, die dieses Gerät noch nicht hat (Notiz kam per Sync): in Schreib- und Wischpausen ein paar
+  // Seiten im Voraus zeichnen, damit beim Weiterblättern nichts weiß bleibt
+  const rasterOk = new WeakSet();
+  let warmT = 0;
+  function warmLater() {
+    if (E.dead || !E.pages.some(p => p.pdf && !rasterOk.has(p))) return;
+    clearTimeout(warmT);
+    warmT = setTimeout(warm, 1200);
+  }
+  async function warm() {
+    if (E.dead) return;
+    if (gest || inertia || E.act) { warmLater(); return; }
+    const i0 = currentIndex();
+    for (let i = i0; i < Math.min(E.pages.length, i0 + 6); i++) {
+      const p = E.pages[i];
+      if (!p.pdf || rasterOk.has(p)) continue;
+      const b = await bgBlob(p, () => !E.dead).catch(() => null);
+      if (b) rasterOk.add(p); else return; // geht gerade nicht (offline, PDF fehlt): nicht im Kreis versuchen
+      warmLater(); // eine nach der anderen
+      return;
+    }
   }
   function syncAssets(pv) {
     const want = [...pv.active].filter(t => t.want);
@@ -509,6 +567,7 @@ export async function openEditor(root, nbId, embed = null) {
     const d = dpr();
     pv.el.style.width = devPx(pv.page.w) / d + 'px'; // ganze Gerätepixel, damit auch folgende Seiten auf dem Raster liegen
     pv.el.style.height = devPx(pv.page.h) / d + 'px';
+    applyPaper(pv);
   }
   function layoutPV(pv) {
     for (const t of pv.active) if (t.cv) placeTile(t);
@@ -612,7 +671,11 @@ export async function openEditor(root, nbId, embed = null) {
     if (A.needRedraw) { A.needRedraw = false; redraw(A.pv, A.removed || null, A.dirtyBox); A.dirtyBox = null; }
     const ctx = ovCtx(A.pv), s = E.scale;
     const lpx = s * dpr(); // Gerätepixel pro Seiteneinheit (Detailstufe wie in den Kacheln)
-    if (E.cur) ink.drawStroke(ctx, E.cur, 0, 0, lpx);
+    if (E.cur) {
+      // mit der Vorhersage des Browsers (siehe onMove) wirkt der Strich näher an der Stiftspitze
+      const c = A.pred?.length && !E.cur.shape ? { ...E.cur, pts: E.cur.pts.concat(A.pred.flatMap(q => [q.x, q.y, q.p])) } : E.cur;
+      ink.drawStroke(ctx, c, 0, 0, lpx);
+    }
     if (A.lasso) {
       const L = A.lasso;
       ctx.save();
@@ -629,6 +692,15 @@ export async function openEditor(root, nbId, embed = null) {
       ctx.restore();
     }
     if (A.drag) for (const st of A.pv.page.strokes) if (E.sel.ids.has(st.id)) ink.drawStroke(ctx, st, A.drag.dx, A.drag.dy, lpx);
+    if (A.scale) { // Auswahl wird gerade größer/kleiner gezogen
+      const { ax, ay, k } = A.scale;
+      ctx.save();
+      ctx.translate(ax, ay);
+      ctx.scale(k, k);
+      ctx.translate(-ax, -ay);
+      for (const st of A.pv.page.strokes) if (E.sel.ids.has(st.id)) ink.drawStroke(ctx, st, 0, 0, lpx * k);
+      ctx.restore();
+    }
     if (A.tool === 'eraser' && A.last) {
       ctx.save();
       ctx.lineWidth = 1 / s;
@@ -673,12 +745,15 @@ export async function openEditor(root, nbId, embed = null) {
     const pv = E.pvs.get(el.dataset.id);
     if (!pv) return;
     e.preventDefault();
+    if (pv.page.missing) { toast('Diese Seite wird noch geladen – gleich nochmal versuchen.'); return; }
     userActive(); // automatischen Abgleich kurz zurückstellen
-    if (card && S.tool === 'card') setTool(lastDrawTool); // auf der Karte schreibt man (Rahmen gilt für die Notiz)
+    const grip = E.sel?.pv === pv ? e.target.closest('.selhandle') : null; // Eckgriff der Auswahl: Größe ändern
+    if (card && S.tool === 'card' && !grip) setTool(lastDrawTool); // auf der Karte schreibt man (Rahmen gilt für die Notiz)
     try { el.setPointerCapture(e.pointerId); } catch { /* egal */ }
     const pt = toPage(pv, e);
-    E.act = { pid: e.pointerId, touch: e.pointerType === 'touch', pv, tool: S.tool, start: pt, last: pt };
-    if (S.tool === 'pen' || S.tool === 'hl') penDown(pt);
+    E.act = { pid: e.pointerId, touch: e.pointerType === 'touch', pv, tool: grip ? 'scale' : S.tool, start: pt, last: pt };
+    if (grip) scaleDown(grip.dataset.c);
+    else if (S.tool === 'pen' || S.tool === 'hl') penDown(pt);
     else if (S.tool === 'eraser') eraseDown(pt);
     else if (S.tool === 'lasso') lassoDown(pt);
     else if (S.tool === 'card') cardDown(pt);
@@ -690,10 +765,16 @@ export async function openEditor(root, nbId, embed = null) {
     const r = A.pv.el.getBoundingClientRect();
     const evs = (e.getCoalescedEvents && e.getCoalescedEvents()) || [];
     const pts = (evs.length ? evs : [e]).map(ev => toPage(A.pv, ev, r));
-    if (A.tool === 'pen' || A.tool === 'hl') penMove(pts);
+    if (A.tool === 'pen' || A.tool === 'hl') {
+      penMove(pts);
+      // Vorhersage des Browsers, wohin der Stift gerade läuft – nur für die Anzeige des entstehenden Strichs
+      // (drawLive); gespeichert werden ausschließlich die echten Punkte
+      A.pred = e.pointerType === 'pen' && e.getPredictedEvents ? e.getPredictedEvents().map(ev => toPage(A.pv, ev, r)) : null;
+    }
     else if (A.tool === 'eraser') eraseMove(pts);
     else if (A.tool === 'lasso') lassoMove(pts);
     else if (A.tool === 'card') cardMove(pts);
+    else if (A.tool === 'scale') scaleMove(pts);
     A.last = pts[pts.length - 1];
     requestLive();
   }
@@ -703,7 +784,8 @@ export async function openEditor(root, nbId, embed = null) {
     try { A.pv.el.releasePointerCapture?.(A.pid); } catch { /* egal */ }
     if (A.tool === 'pen' || A.tool === 'hl') penUp();
     else if (A.tool === 'eraser') eraseUp();
-    else if (A.tool === 'lasso') lassoUp();
+    else if (A.tool === 'lasso') lassoUp(e.type === 'pointerup');
+    else if (A.tool === 'scale') scaleUp(e.type === 'pointerup');
     else if (A.tool === 'card') cardUp(e.type === 'pointerup');
     else if (A.tool === 'text' && e.type === 'pointerup') { const pt = toPage(A.pv, e); editText(A.pv, hitText(A.pv, pt), pt); }
     E.act = null;
@@ -716,6 +798,7 @@ export async function openEditor(root, nbId, embed = null) {
     A.box?.remove();
     if (A.tool === 'eraser' && A.changed) { A.pv.extra = null; redraw(A.pv); } // ausgeblendete Striche wieder zeigen
     if (A.drag) { dragVisual(0, 0); redraw(A.pv); }
+    if (A.scale) { scaleVisual(null); E.sel.barEl.style.visibility = ''; redraw(A.pv); }
     E.act = null;
     requestLive();
   }
@@ -883,7 +966,7 @@ export async function openEditor(root, nbId, embed = null) {
       dragVisual(A.drag.dx, A.drag.dy);
     } else if (A.lasso) for (const p of pts) A.lasso.push(p.x, p.y);
   }
-  function lassoUp() {
+  function lassoUp(ok = true) {
     const A = E.act, pv = A.pv, page = pv.page;
     if (A.drag) {
       const { dx, dy } = A.drag;
@@ -895,8 +978,10 @@ export async function openEditor(root, nbId, embed = null) {
         const before = snap(page);
         page.strokes = page.strokes.map(s => (E.sel.ids.has(s.id) ? ink.translateStroke(s, dx, dy) : s));
         page.texts = page.texts.map(t => (E.sel.tids.has(t.id) ? { ...t, x: r2(t.x + dx), y: r2(t.y + dy) } : t));
+        if (E.sel.iids.size) page.images = page.images.map(im => (E.sel.iids.has(im.id) ? { ...im, x: r2(im.x + dx), y: r2(im.y + dy) } : im));
         commit(pv, before);
         renderTexts(pv);
+        if (E.sel.iids.size) syncAssets(pv);
         box = joinBox(box, selBox());
       }
       if (box) redraw(pv, null, box);
@@ -905,7 +990,12 @@ export async function openEditor(root, nbId, embed = null) {
       return;
     }
     const L = A.lasso;
-    if (!L || L.length < 8) return;
+    if (!L || L.length < 8) {
+      // nur angetippt: das (oberste) frei liegende Bild an dieser Stelle auswählen
+      const im = ok && L && [...(page.images || [])].reverse().find(m => isFree(m) && inside(m, A.start));
+      if (im) setSelection(pv, new Set(), new Set(), new Set([im.id]));
+      return;
+    }
     // nur Striche in der Nähe des Lassos genau prüfen (räumlicher Index) – große Seiten haben Tausende
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
     for (let i = 0; i < L.length; i += 2) { x0 = Math.min(x0, L[i]); x1 = Math.max(x1, L[i]); y0 = Math.min(y0, L[i + 1]); y1 = Math.max(y1, L[i + 1]); }
@@ -918,25 +1008,31 @@ export async function openEditor(root, nbId, embed = null) {
       const b = textBox(pv, t);
       return ink.pointInPoly(b.x + b.w / 2, b.y + b.h / 2, L) || ink.pointInPoly(b.x + 4, b.y + b.h / 2, L);
     }).map(t => t.id));
-    if (ids.size || tids.size) setSelection(pv, ids, tids);
+    // frei liegende Bilder, deren Mitte im Lasso liegt, gehören dazu (z. B. ein Foto samt Beschriftung verschieben)
+    const iids = new Set((page.images || []).filter(im => isFree(im) && ink.pointInPoly(im.x + im.w / 2, im.y + im.h / 2, L)).map(im => im.id));
+    if (ids.size || tids.size || iids.size) setSelection(pv, ids, tids, iids);
   }
 
-  function setSelection(pv, ids, tids) {
+  // Auswahl: Striche (ids), Texte (tids) und frei liegende Bilder (iids). Rahmen mit vier Eckgriffen:
+  // innen ziehen verschiebt, an einer Ecke ziehen ändert die Größe (gleichmäßig, die Ecke gegenüber bleibt stehen).
+  function setSelection(pv, ids, tids, iids = new Set()) {
     clearSelection();
     const boxEl = h('div', { class: 'selbox' });
+    const handles = ['nw', 'ne', 'sw', 'se'].map(c => h('div', { class: 'selhandle ' + c, 'data-c': c }));
     const barEl = h('div', { class: 'selmenu' },
       h('button', { onclick: deleteSel }, 'Löschen'),
       h('button', { onclick: duplicateSel }, 'Duplizieren'),
       h('button', { onclick: copySel }, 'Kopieren'),
-      h('button', { onclick: e => menu(e.currentTarget, [{ swatches: [...PEN_COLORS, ...HL_COLORS], onPick: recolorSel }]) }, 'Farbe'));
-    pv.el.append(boxEl, barEl);
-    E.sel = { pv, ids, tids, boxEl, barEl, box: null };
+      ids.size || tids.size ? h('button', { onclick: e => menu(e.currentTarget, [{ swatches: [...PEN_COLORS, ...HL_COLORS], onPick: recolorSel }]) }, 'Farbe') : null);
+    pv.el.append(boxEl, ...handles, barEl);
+    E.sel = { pv, ids, tids, iids, boxEl, barEl, handles, box: null, inner: null };
     updateSel();
   }
   function clearSelection() {
     if (!E.sel) return;
     E.sel.boxEl.remove();
     E.sel.barEl.remove();
+    for (const hd of E.sel.handles) hd.remove();
     E.sel = null;
   }
   function updateSel() {
@@ -946,47 +1042,173 @@ export async function openEditor(root, nbId, embed = null) {
     const add = b => { x0 = Math.min(x0, b.x); y0 = Math.min(y0, b.y); x1 = Math.max(x1, b.x + b.w); y1 = Math.max(y1, b.y + b.h); };
     for (const s of sel.pv.page.strokes) if (sel.ids.has(s.id)) add(ink.strokeBBox(s));
     for (const t of sel.pv.page.texts) if (sel.tids.has(t.id)) add(textBox(sel.pv, t));
+    for (const im of sel.pv.page.images || []) if (sel.iids.has(im.id)) add(im);
     if (x0 === Infinity) { clearSelection(); return; }
+    sel.inner = { x0, y0, x1, y1 }; // Inhalt ohne Rand: seine Ecken sind die Fixpunkte beim Größe-Ändern
     sel.box = { x: x0 - 6, y: y0 - 6, w: x1 - x0 + 12, h: y1 - y0 + 12 };
     positionSel();
   }
-  function positionSel() {
-    const { box, boxEl, barEl } = E.sel, s = E.scale;
+  function positionSel(box = E.sel.box) {
+    const { boxEl, barEl, handles } = E.sel, s = E.scale;
     if (!box) return;
     Object.assign(boxEl.style, { left: box.x * s + 'px', top: box.y * s + 'px', width: box.w * s + 'px', height: box.h * s + 'px' });
-    const top = box.y * s - 48;
+    for (const hd of handles) {
+      const c = hd.dataset.c;
+      hd.style.left = (c.includes('w') ? box.x : box.x + box.w) * s + 'px';
+      hd.style.top = (c.includes('n') ? box.y : box.y + box.h) * s + 'px';
+    }
+    const top = box.y * s - 58;
     barEl.style.left = Math.max(0, box.x * s) + 'px';
-    barEl.style.top = (top < 4 ? (box.y + box.h) * s + 8 : top) + 'px';
+    barEl.style.top = (top < 4 ? (box.y + box.h) * s + 18 : top) + 'px';
   }
+  const selImgs = sel => (sel.pv.page.images || []).filter(im => sel.iids.has(im.id)).map(im => [im, sel.pv.dom.get(im.id)?.el]).filter(x => x[1]);
   function dragVisual(dx, dy) {
     const sel = E.sel, s = E.scale;
     const tr = dx || dy ? `translate(${dx * s}px, ${dy * s}px)` : '';
     sel.boxEl.style.transform = sel.barEl.style.transform = tr;
+    for (const hd of sel.handles) hd.style.transform = tr;
     for (const d of sel.pv.texts.children) if (sel.tids.has(d.dataset.id)) d.style.transform = tr;
+    for (const [, el] of selImgs(sel)) el.style.transform = tr;
   }
+
+  // Größe ändern: Faktor = Abstand des Stifts zur festen Ecke gegenüber, bezogen auf den Abstand beim Ansetzen.
+  // Währenddessen nur Vorschau (Striche auf der Live-Ebene, Texte/Bilder per CSS); übernommen wird beim Absetzen.
+  function scaleDown(corner) {
+    const A = E.act, b = E.sel.inner;
+    A.scale = { ax: corner.includes('w') ? b.x1 : b.x0, ay: corner.includes('n') ? b.y1 : b.y0, k: 1 };
+    A.scale.d0 = Math.max(4, Math.hypot(A.start.x - A.scale.ax, A.start.y - A.scale.ay));
+    E.sel.barEl.style.visibility = 'hidden';
+    redraw(A.pv, E.sel.ids, E.sel.box); // ausgewählte Striche aus den Kacheln nehmen – sie werden live gezeichnet
+  }
+  function scaleMove(pts) {
+    const sc = E.act.scale, q = pts[pts.length - 1];
+    sc.k = Math.min(8, Math.max(0.1, Math.hypot(q.x - sc.ax, q.y - sc.ay) / sc.d0));
+    scaleVisual(sc);
+  }
+  const scaled = (v, a, k) => a + (v - a) * k;
+  function scaleVisual(sc) {
+    const sel = E.sel, s = E.scale;
+    const tf = (x, y) => (sc ? `translate(${(scaled(x, sc.ax, sc.k) - x) * s}px, ${(scaled(y, sc.ay, sc.k) - y) * s}px) scale(${sc.k})` : '');
+    for (const d of sel.pv.texts.children) {
+      if (!sel.tids.has(d.dataset.id)) continue;
+      const t = sel.pv.page.texts.find(x => x.id === d.dataset.id);
+      d.style.transformOrigin = '0 0';
+      d.style.transform = t ? tf(t.x, t.y) : '';
+    }
+    for (const [im, el] of selImgs(sel)) { el.style.transformOrigin = '0 0'; el.style.transform = tf(im.x, im.y); }
+    const b = sel.box;
+    positionSel(sc ? { x: scaled(b.x, sc.ax, sc.k), y: scaled(b.y, sc.ay, sc.k), w: b.w * sc.k, h: b.h * sc.k } : b);
+  }
+  function scaleUp(ok) {
+    const A = E.act, sel = E.sel, pv = A.pv, page = pv.page, { ax, ay, k } = A.scale;
+    scaleVisual(null);
+    sel.barEl.style.visibility = '';
+    let box = sel.box;
+    if (ok && Math.abs(k - 1) > 0.01) {
+      const before = snap(page);
+      page.strokes = page.strokes.map(st => (sel.ids.has(st.id) ? ink.scaleStroke(st, ax, ay, k) : st));
+      page.texts = page.texts.map(t => (sel.tids.has(t.id)
+        ? { ...t, x: r2(scaled(t.x, ax, k)), y: r2(scaled(t.y, ay, k)), w: r2(t.w * k), size: Math.max(6, r2(t.size * k)) } : t));
+      if (sel.iids.size) page.images = page.images.map(im => (sel.iids.has(im.id)
+        ? { ...im, x: r2(scaled(im.x, ax, k)), y: r2(scaled(im.y, ay, k)), w: r2(im.w * k), h: r2(im.h * k) } : im));
+      commit(pv, before);
+      renderTexts(pv);
+      if (sel.iids.size) syncAssets(pv);
+      updateSel();
+      box = joinBox(box, sel.box);
+    }
+    redraw(pv, null, box);
+  }
+
   function selItems() {
-    const { pv, ids, tids } = E.sel;
-    return { strokes: pv.page.strokes.filter(s => ids.has(s.id)), texts: pv.page.texts.filter(t => tids.has(t.id)) };
+    const { pv, ids, tids, iids } = E.sel;
+    return { strokes: pv.page.strokes.filter(s => ids.has(s.id)), texts: pv.page.texts.filter(t => tids.has(t.id)), images: (pv.page.images || []).filter(im => iids.has(im.id)) };
   }
   function deleteSel() {
-    const { pv, ids, tids } = E.sel, page = pv.page, before = snap(page);
+    const { pv, ids, tids, iids } = E.sel, page = pv.page, before = snap(page);
     page.strokes = page.strokes.filter(s => !ids.has(s.id));
     page.texts = page.texts.filter(t => !tids.has(t.id));
+    if (iids.size) {
+      for (const im of page.images) if (iids.has(im.id)) E.unused.add(im.key); // Datei erst beim Schließen löschen (Rückgängig)
+      page.images = page.images.filter(im => !iids.has(im.id));
+    }
     clearSelection();
     commit(pv, before);
     redrawChanged(pv, before.strokes);
     renderTexts(pv);
+    if (iids.size) syncAssets(pv);
   }
-  function addItems(pv, items, dx, dy) {
+  // Striche/Texte/Bilder (aus der Auswahl oder der Ablage) als neue Objekte auf die Seite setzen; Bilder bekommen
+  // dabei eine eigene Kopie ihrer Datei (jede Bilddatei gehört genau einer Stelle)
+  async function addItems(pv, items, dx, dy) {
+    const ni = [];
+    for (const im of items.images || []) {
+      const b = await store.getBlob(im.key);
+      if (!b) continue;
+      const key = 'img_' + uid();
+      await store.putBlob(key, b);
+      E.unused.add(key);
+      ni.push({ ...im, id: 'i' + uid(), key, x: r2(im.x + dx), y: r2(im.y + dy), free: true });
+    }
     const page = pv.page, before = snap(page);
     const ns = items.strokes.map(s => ({ ...ink.translateStroke(s, dx, dy), id: uid() }));
     const nt = items.texts.map(t => ({ ...t, id: uid(), x: t.x + dx, y: t.y + dy }));
     page.strokes = [...page.strokes, ...ns];
     page.texts = [...page.texts, ...nt];
+    if (ni.length) page.images = [...(page.images || []), ...ni];
     commit(pv, before);
     redrawChanged(pv, before.strokes);
     renderTexts(pv);
-    setSelection(pv, new Set(ns.map(s => s.id)), new Set(nt.map(t => t.id)));
+    if (ni.length) syncAssets(pv);
+    setSelection(pv, new Set(ns.map(s => s.id)), new Set(nt.map(t => t.id)), new Set(ni.map(im => im.id)));
+  }
+
+  // Bild oder Foto einfügen: landet in der Mitte des sichtbaren Teils der Seite und ist gleich ausgewählt.
+  // Muss direkt im Klick laufen (Dateiauswahl am iPad).
+  function insertImage(pv = null) {
+    pickFiles('image/*').then(([f]) => { if (f) placeImage(f, pv); });
+  }
+  async function placeImage(file, pv = null) {
+    const pr = progress('Bild wird eingefügt …');
+    try {
+      const bmp = await loadImage(file);
+      const k = Math.min(1, 2400 / Math.max(bmp.width, bmp.height)); // große Fotos verkleinern
+      const c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(bmp.width * k));
+      c.height = Math.max(1, Math.round(bmp.height * k));
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#fff'; // durchsichtige Stellen wären in JPEG sonst schwarz
+      ctx.fillRect(0, 0, c.width, c.height);
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(bmp, 0, 0, c.width, c.height);
+      bmp.close?.();
+      const blob = await encodeImage(c, 0.88);
+      const iw = c.width, ih = c.height;
+      c.width = c.height = 0;
+      pv ||= E.pvs.get(E.pages[currentIndex()].id);
+      const page = pv.page;
+      if (page.missing || !blob) return;
+      // sichtbarer Teil der Seite (Seiteneinheiten); höchstens 2 Bildpunkte je Einheit und 70 % des Sichtbaren
+      const r = pv.el.getBoundingClientRect(), sr = scroller.getBoundingClientRect(), s = E.scale;
+      let vx0 = Math.max(0, (sr.left - r.left) / s), vx1 = Math.min(page.w, (sr.right - r.left) / s);
+      let vy0 = Math.max(0, (sr.top - r.top) / s), vy1 = Math.min(page.h, (sr.bottom - r.top) / s);
+      if (vx1 - vx0 < 20 || vy1 - vy0 < 20) { vx0 = vy0 = 0; vx1 = page.w; vy1 = Math.min(page.h, page.w * 1.4); } // Seite nicht im Bild
+      const fit = Math.min(1, (0.7 * (vx1 - vx0)) / (iw / 2), (0.7 * (vy1 - vy0)) / (ih / 2));
+      const w = r2(Math.max(40, (iw / 2) * fit)), hh = r2((w * ih) / iw);
+      const key = 'img_' + uid(), id = 'i' + uid();
+      await store.putBlob(key, blob);
+      E.unused.add(key);
+      const before = snap(page);
+      page.images = [...(page.images || []), { id, key, x: r2((vx0 + vx1 - w) / 2), y: r2((vy0 + vy1 - hh) / 2), w, h: hh, free: true }];
+      commit(pv, before);
+      syncAssets(pv);
+      setTool('lasso');
+      setSelection(pv, new Set(), new Set(), new Set([id]));
+      toast('Bild eingefügt – ziehen verschiebt, die Ecken ändern die Größe');
+    } catch (err) {
+      console.error(err);
+      toast('Das Bild konnte nicht eingefügt werden.');
+    } finally { pr.close(); }
   }
   function duplicateSel() { addItems(E.sel.pv, selItems(), 24, 24); }
   function copySel() {
@@ -1195,6 +1417,7 @@ export async function openEditor(root, nbId, embed = null) {
     const old = pv.page.strokes;
     pv.page.strokes = st.strokes;
     pv.page.texts = st.texts;
+    if (st.images && st.images !== pv.page.images) { pv.page.images = st.images; syncAssets(pv); }
     redrawChanged(pv, old);
     renderTexts(pv);
     markDirty(pv.page);
@@ -1205,6 +1428,7 @@ export async function openEditor(root, nbId, embed = null) {
 
   function markDirty(page) {
     E.dirty.add(page);
+    E.touched.add(page.id);
     const pv = E.pvs.get(page.id);
     if (pv) { pv.prevFresh = false; previewLater(); } // Vorschau später (in einer Pause) auffrischen
     clearTimeout(E.saveT);
@@ -1296,8 +1520,10 @@ export async function openEditor(root, nbId, embed = null) {
     p.texts = p.texts.map(t => ({ ...t, id: uid() }));
     if (src.bg) {
       p.bg = 'bg_' + p.id;
-      const b = await store.getBlob(src.bg);
-      if (b) await store.putBlob(p.bg, b);
+      if (!src.pdf) { // PDF-Seite (page.pdf): die Kopie zeigt aufs selbe PDF, ihr Bild entsteht daraus
+        const b = await store.getBlob(src.bg);
+        if (b) await store.putBlob(p.bg, b);
+      }
     }
     p.images = [];
     for (const im of src.images || []) {
@@ -1318,7 +1544,9 @@ export async function openEditor(root, nbId, embed = null) {
     E.dirty.delete(p);
     nb.pageIds = E.pages.map(x => x.id);
     await store.del('pages', p.id);
-    if (p.bg) await store.delBlob(p.bg);
+    if (p.pdf) { // das Original-PDF erst löschen, wenn keine Seite der Notiz mehr daraus stammt
+      if (!E.pages.some(x => x.pdf?.key === p.pdf.key)) { await store.delBlob(p.pdf.key); await store.delMetaPrefix(`pdfbg:${p.pdf.key}:`); }
+    } else if (p.bg) await store.delBlob(p.bg);
     for (const im of p.images || []) await store.delBlob(im.key);
     if (!E.pages.length) await insertPage(-1, newPage(nb));
     else { await saveNb(); layoutAll(); renumber(); }
@@ -1335,12 +1563,13 @@ export async function openEditor(root, nbId, embed = null) {
     renumber();
     showPage(E.pvs.get(p.id), 'center');
   }
-  function setPageProp(pv, k, v) { pv.page[k] = v; redraw(pv); markDirty(pv.page); }
+  function setPageProp(pv, k, v) { pv.page[k] = v; applyPaper(pv); redraw(pv); markDirty(pv.page); }
 
   function pageMenu(pv, anchor) {
     const i = E.pages.indexOf(pv.page), p = pv.page;
     if (card) { // Karteikarte: nur Einfügen, Vorlage und Papier
       menu(anchor, [
+        { icon: 'image', label: 'Bild einfügen …', onClick: () => insertImage(pv) },
         E.clip && { icon: 'paste', label: 'Kopiertes einfügen', onClick: () => addItems(pv, E.clip, 0, 0) },
         { header: 'Vorlage' },
         ...ink.TEMPLATES.map(([k, l]) => ({ label: l, checked: p.template === k, onClick: () => setPageProp(pv, 'template', k) })),
@@ -1352,6 +1581,7 @@ export async function openEditor(root, nbId, embed = null) {
     menu(anchor, [
       { icon: 'pagePlus', label: 'Neue Seite danach', onClick: () => addPageAfter(i) },
       { icon: 'copy', label: 'Seite duplizieren', onClick: () => duplicatePage(i) },
+      { icon: 'image', label: 'Bild einfügen …', onClick: () => insertImage(pv) },
       isLongPage(p) && { icon: 'file', label: 'In Seiten aufteilen', onClick: async () => {
         await flush(); // erst speichern, dann aufteilen und die Notiz neu öffnen
         if (await splitDialog([nb])) dispatchEvent(new HashChangeEvent('hashchange'));
@@ -1372,8 +1602,9 @@ export async function openEditor(root, nbId, embed = null) {
 
   function moreMenu(anchor) {
     menu(anchor, [
+      { icon: 'image', label: 'Bild oder Foto einfügen …', onClick: () => insertImage() },
+      card ? null : { icon: 'file', label: 'PDF anhängen …', onClick: attachPdf },
       { icon: 'download', label: 'Als PDF exportieren', onClick: exportNb },
-      { icon: 'file', label: 'PDF anhängen …', onClick: attachPdf },
       { icon: 'edit', label: 'Notizbuch umbenennen', onClick: rename },
       { sep: true },
       { icon: 'hand', label: 'Mit Finger zeichnen', checked: S.fingerDraw, onClick: toggleFinger },
@@ -1385,7 +1616,7 @@ export async function openEditor(root, nbId, embed = null) {
     await flush();
     const pr = progress('PDF wird erstellt …');
     try {
-      const blob = await exportPdf(E.pages, (i, n) => pr.set(`Seite ${i} von ${n}`, i / n));
+      const blob = await exportPdf(E.pages.filter(x => !x.missing), (i, n) => pr.set(`Seite ${i} von ${n}`, i / n));
       download(blob, safeName(nb.title) + '.pdf');
     } catch (err) {
       console.error(err);
@@ -1434,7 +1665,8 @@ export async function openEditor(root, nbId, embed = null) {
         li('Radierer','„Ganze Striche“ löscht jeden berührten Strich auf einmal, „Teilweise“ entfernt nur, was du überfährst – wie ein echter Radierer.'),
         li('Stift halten', 'am Ende eines Strichs kurz stillhalten → wird zur geraden Linie, zum Kreis, Rechteck oder Dreieck. Bei Linien kannst du danach den Endpunkt noch verschieben.'),
         li('Formen-Schalter', 'jede gezeichnete Form wird automatisch begradigt.'),
-        li('Lasso', 'Inhalt umkreisen → verschieben, löschen, duplizieren, umfärben oder kopieren.'),
+        li('Lasso', 'Inhalt umkreisen → verschieben, löschen, duplizieren, umfärben oder kopieren. An den vier Eckpunkten ziehen ändert die Größe.'),
+        li('Bilder', '⋯ → „Bild oder Foto einfügen“ (am PC auch Strg + V). Mit dem Lasso antippen wählt ein eingefügtes Bild aus: verschieben, Größe ändern, löschen.'),
         li('Text', 'auf die Seite tippen und schreiben (mit dem Pencil geht auch Kritzeln/Scribble).'),
         li('Seitenmenü', '⋯ oben rechts an jeder Seite: Vorlage, Papier, duplizieren, verschieben, löschen.'),
         li('Am PC', 'Maus zeichnet, Strg + Mausrad zoomt, Strg + Z / Strg + Y.')),
@@ -1610,7 +1842,7 @@ export async function openEditor(root, nbId, embed = null) {
     const go = () => { if (!labelQ) return; cancelAnimationFrame(labelQ.r); clearTimeout(labelQ.t); labelQ = null; updatePageLabel(); };
     labelQ = { r: requestAnimationFrame(go), t: setTimeout(go, 150) };
   }
-  scroller.addEventListener('scroll', () => { updateVisible(); labelLater(); nav?.update(); }, { passive: true });
+  scroller.addEventListener('scroll', () => { updateVisible(); labelLater(); nav?.update(); warmLater(); }, { passive: true });
 
   function onKey(e) {
     if (e.target.matches?.('input, textarea')) return;
@@ -1662,10 +1894,12 @@ export async function openEditor(root, nbId, embed = null) {
       if (!fresh) return;
       const resized = fresh.w !== pv.page.w || fresh.h !== pv.page.h;
       Object.assign(pv.page, fresh);
+      if (pv.page.missing) { delete pv.page.missing; pv.el.classList.remove('missing'); } // Platzhalter ist jetzt da
       E.undo = E.undo.filter(u => u.id !== id);
       E.redo = E.redo.filter(u => u.id !== id);
       updUndo();
       if (E.sel?.pv === pv) clearSelection();
+      applyPaper(pv);
       if (resized) { unrender(pv); buildTiles(pv); layoutAll(); } // Kacheln kommen über die Warteschlange
       else { syncAssets(pv); redraw(pv); } // geänderte Bilder werden dabei neu geladen
       pv.prevFresh = false;
@@ -1673,8 +1907,16 @@ export async function openEditor(root, nbId, embed = null) {
       renderTexts(pv);
     }
   }
+  // Bild aus der Zwischenablage (am PC: Strg + V, z. B. ein Bildschirmfoto)
+  const onPaste = e => {
+    if (e.target.matches?.('input, textarea') || (keyOwner && keyOwner !== editor && keyOwner.isConnected)) return;
+    const f = [...(e.clipboardData?.files || [])].find(x => x.type.startsWith('image/'));
+    if (f) { e.preventDefault(); placeImage(f); }
+  };
   changes.addEventListener('change', onRemote);
   toolEvents.addEventListener('change', onToolChange);
+  syncEvents.addEventListener('status', updSync);
+  addEventListener('paste', onPaste);
   addEventListener('keydown', onKey);
   document.addEventListener('visibilitychange', onVis);
   addEventListener('pointerup', onUpAnywhere, true);
@@ -1705,6 +1947,7 @@ export async function openEditor(root, nbId, embed = null) {
     nav.setOpen(!!S.thumbs);
   }
   renumber();
+  warmLater();
   ro.observe(stage);
   if (embed?.side === 'front' && E.pages[1]) { // Frage steht schon vorne: gleich die Rückseite zeigen
     const pr = E.pvs.get(E.pages[1].id).el.getBoundingClientRect(), sr = scroller.getBoundingClientRect();
@@ -1722,11 +1965,18 @@ export async function openEditor(root, nbId, embed = null) {
     if (!embed) saveView();
     for (const ta of editor.querySelectorAll('.text-edit')) ta.blur();
     await flush();
-    if (card) await updateThumb(nb).catch(() => {}); // Vorschaubild der Karte auffrischen
+    // Vorschaubild auffrischen, wenn sich die erste Seite (Karte: Vorder-/Rückseite) geändert hat – nebenher,
+    // damit „Zurück“ nicht darauf wartet; die Bibliothek tauscht das Bild aus, sobald es fertig ist
+    const first = coverPages(nb);
+    if (hasCover(nb) && first.some(id => E.touched.has(id))) makeCover(nb, E.pages.slice(0, first.length)).catch(() => {});
+    // Bilddateien, auf die keine Seite mehr zeigt (gelöscht, Einfügen rückgängig gemacht)
+    const used = new Set(E.pages.flatMap(x => (x.images || []).map(im => im.key)));
+    for (const k of E.unused) if (!used.has(k)) await store.delBlob(k).catch(() => {});
     E.dead = true;
     cancelAnimationFrame(pumpRaf);
     clearTimeout(pumpTo);
     clearTimeout(prevT);
+    clearTimeout(warmT);
     queue.clear();
     stopInertia();
     nav?.destroy();
@@ -1737,6 +1987,8 @@ export async function openEditor(root, nbId, embed = null) {
     removeEventListener('pointercancel', onUpAnywhere, true);
     changes.removeEventListener('change', onRemote);
     toolEvents.removeEventListener('change', onToolChange);
+    syncEvents.removeEventListener('status', updSync);
+    removeEventListener('paste', onPaste);
     for (const pv of E.pvs.values()) unrender(pv);
   };
   destroy.addImage = addImage;

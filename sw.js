@@ -1,17 +1,34 @@
-// Offline-Fähigkeit: App-Dateien kommen aus dem Cache und werden im Hintergrund aktualisiert
-// (beim nächsten Öffnen ist dann die neue Version da). Notizen selbst liegen ohnehin im Gerät.
-const CACHE = 'notizen-v1793351478208';
+// Offline-Fähigkeit: App-Dateien kommen aus dem Cache. Jede veröffentlichte Version hat ihren eigenen Cache
+// (build-web.js setzt den Namen): Der neue Service Worker füllt ihn komplett, erst dann löst er den alten ab –
+// alte und neue Dateien werden so nie gemischt. Notizen selbst liegen ohnehin im Gerät.
+const CACHE = 'notizen-v1794345275506';
 const SHELL = [
   './', 'index.html', 'manifest.json', 'icon.svg', 'icon-180.png', 'icon-512.png', 'css/style.css',
   'js/main.js', 'js/library.js', 'js/editor.js', 'js/ink.js', 'js/ui.js', 'js/store.js',
-  'js/pdfio.js', 'js/onenote.js', 'js/sync.js', 'js/cloud.js', 'js/config.js', 'js/srs.js', 'js/cards.js', 'js/review.js', 'js/occlusion.js', 'js/version.js', 'js/split.js', 'js/claude.js', 'js/inbox.js', 'js/storage.js', 'js/pagenav.js', 'js/merge.js',
+  'js/pdfio.js', 'js/onenote.js', 'js/sync.js', 'js/cloud.js', 'js/config.js', 'js/srs.js', 'js/cards.js', 'js/review.js', 'js/occlusion.js', 'js/version.js', 'js/split.js', 'js/claude.js', 'js/inbox.js', 'js/storage.js', 'js/pagenav.js', 'js/merge.js', 'js/covers.js',
+];
+// PDF-Bibliotheken (pdfio.js): Seit PDFs als Original abgeglichen werden, zeichnet jedes Gerät die Seitenbilder
+// selbst – das muss auch ohne Internet gehen. Feste Versionen, ändern sich nie.
+const LIBS = [
+  'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js',
+  'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js',
+  'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js',
 ];
 // GitHub Pages erlaubt dem Browser, Dateien 10 Minuten zwischenzuspeichern (max-age=600). Ohne Rückfrage beim
 // Server landen nach einem Update sonst alte Dateien im neuen Cache. Unveränderte Dateien kommen als kurzes 304.
 const fresh = { cache: 'no-cache' };
 
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL.map(u => new Request(u, fresh)))).then(() => self.skipWaiting()));
+  e.waitUntil(caches.open(CACHE).then(async c => {
+    await c.addAll(SHELL.map(u => new Request(u, fresh)));
+    // Bibliotheken aus dem vorigen Cache übernehmen, sonst laden. Klappt das nicht (offline), holt sie der erste Gebrauch.
+    await Promise.all(LIBS.map(async u => {
+      try {
+        const r = (await caches.match(u)) || (await fetch(u, { mode: 'cors' }));
+        if (r.ok) await c.put(u, r);
+      } catch { /* später */ }
+    }));
+  }).then(() => self.skipWaiting()));
 });
 self.addEventListener('activate', e => {
   e.waitUntil(caches.keys()
@@ -38,9 +55,14 @@ self.addEventListener('fetch', e => {
     }));
     return;
   }
+  // Alles andere: aus dem Cache dieser Version. Nur was dort fehlt, kommt aus dem Netz (und wird aufgehoben).
+  // Kein Auffrischen im Hintergrund – sonst lägen nach einem halb durchgelaufenen Update alte und neue Module
+  // nebeneinander im Cache, und die App startete im schlimmsten Fall nicht mehr.
   e.respondWith(caches.open(CACHE).then(async cache => {
     const hit = await cache.match(req, { ignoreSearch: own });
-    const net = fetch(req, own ? fresh : undefined).then(r => { if (r.ok) cache.put(req, r.clone()); return r; }).catch(() => hit);
-    return hit || net;
+    if (hit) return hit;
+    const r = await fetch(req, own ? fresh : undefined);
+    if (r.ok) cache.put(req, r.clone());
+    return r;
   }));
 });
