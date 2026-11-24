@@ -439,3 +439,31 @@ img[data-cover]:not([src]) { visibility: hidden; }
 .scrub.drag .scrub-knob::after { width: 10px; background: var(--accent); }
 .scrub-bubble { position: absolute; right: 34px; top: 16px; display: none; padding: 5px 10px; border-radius: 8px; background: var(--panel); color: inherit; font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap; box-shadow: 0 2px 12px rgba(0, 0, 0, .2); }
 .scrub.drag .scrub-bubble { display: block; }
+
+/* ---------- Rechnen (calcui.js) ---------- */
+.calc-line { padding: 10px 0; border-bottom: 1px solid var(--line); }
+.calc-line:first-child { padding-top: 0; }
+.calc-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.calc-chip { display: flex; flex-direction: column; align-items: center; gap: 1px; min-width: 38px; padding: 4px 4px 3px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel2); cursor: pointer; }
+.calc-chip b { font-size: 19px; line-height: 1.15; font-variant-numeric: tabular-nums; }
+.calc-chip.sup b { font-size: 14px; }
+.calc-chip.on { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.calc-chip.fixed { border-color: #159a4c; }
+.calc-chip.off { opacity: .4; }
+.calc-thumb { width: 26px; height: 26px; }
+.calc-pal { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; padding: 8px; border-radius: 10px; background: var(--panel2); }
+.calc-pal-hint { width: 100%; }
+.calc-pal-break { width: 100%; height: 2px; }
+.calc-key { min-width: 40px; height: 40px; padding: 0 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); font-size: 17px; cursor: pointer; }
+.calc-key.alt { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.calc-key.on { background: var(--accent-soft); }
+.calc-key.wide { font-size: 14px; }
+.calc-key:active, .calc-chip:active { filter: brightness(.92); }
+.calc-row { display: flex; align-items: center; gap: 12px; margin-top: 8px; }
+.calc-expr { flex: 1; min-width: 0; font-size: 18px; font-variant-numeric: tabular-nums; }
+.calc-res { flex: none; max-width: 55%; font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.calc-res.bad { font-size: 13px; font-weight: 400; color: var(--danger); }
+.train-prompt { font-size: 18px; margin: 4px 0 8px; }
+.train-prompt b { font-size: 30px; margin-left: 4px; }
+.train-pad { display: block; width: 100%; height: 220px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel2); touch-action: none; }
+.train-btns { justify-content: flex-start; margin: 8px 0 4px; }

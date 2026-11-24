@@ -5,6 +5,7 @@ import { h, icon, menu, modal, confirmDialog, promptText, toast, progress, pickF
 import { importPdf, exportPdf, bgBlob, loadImage, encodeImage } from './pdfio.js';
 import { isCard, createCard, snapshot } from './cards.js';
 import { makeCover, hasCover, coverPages } from './covers.js';
+import { calcDialog } from './calcui.js';
 import { startOcclusion } from './occlusion.js';
 import { createPageNav } from './pagenav.js';
 import { markForClaude } from './claude.js';
@@ -1023,6 +1024,7 @@ export async function openEditor(root, nbId, embed = null) {
       h('button', { onclick: deleteSel }, 'Löschen'),
       h('button', { onclick: duplicateSel }, 'Duplizieren'),
       h('button', { onclick: copySel }, 'Kopieren'),
+      ids.size ? h('button', { onclick: calcSel }, 'Berechnen') : null,
       ids.size || tids.size ? h('button', { onclick: e => menu(e.currentTarget, [{ swatches: [...PEN_COLORS, ...HL_COLORS], onPick: recolorSel }]) }, 'Farbe') : null);
     pv.el.append(boxEl, ...handles, barEl);
     E.sel = { pv, ids, tids, iids, boxEl, barEl, handles, box: null, inner: null };
@@ -1209,6 +1211,17 @@ export async function openEditor(root, nbId, embed = null) {
       console.error(err);
       toast('Das Bild konnte nicht eingefügt werden.');
     } finally { pr.close(); }
+  }
+  // Handschriftliche Rechnung in der Auswahl erkennen und das Ergebnis als Text daneben schreiben (calc.js)
+  async function calcSel() {
+    const { pv } = E.sel;
+    const add = await calcDialog(selItems().strokes, { pageW: pv.page.w });
+    if (!add?.length || E.dead || !E.pvs.has(pv.page.id)) return;
+    const page = pv.page, before = snap(page);
+    page.texts = [...page.texts, ...add.map(t => ({ id: uid(), x: r2(t.x), y: r2(t.y), w: r2(t.w), size: r2(t.size), color: t.color, text: t.text }))];
+    commit(pv, before);
+    renderTexts(pv);
+    clearSelection();
   }
   function duplicateSel() { addItems(E.sel.pv, selItems(), 24, 24); }
   function copySel() {
@@ -1666,6 +1679,7 @@ export async function openEditor(root, nbId, embed = null) {
         li('Stift halten', 'am Ende eines Strichs kurz stillhalten → wird zur geraden Linie, zum Kreis, Rechteck oder Dreieck. Bei Linien kannst du danach den Endpunkt noch verschieben.'),
         li('Formen-Schalter', 'jede gezeichnete Form wird automatisch begradigt.'),
         li('Lasso', 'Inhalt umkreisen → verschieben, löschen, duplizieren, umfärben oder kopieren. An den vier Eckpunkten ziehen ändert die Größe.'),
+        li('Rechnen', 'Rechnung mit dem Lasso einkreisen → „Berechnen“: Die App liest die Handschrift, rechnet aus und schreibt das Ergebnis daneben. Falsch erkannte Zeichen antippen und korrigieren – sie lernt deine Schrift.'),
         li('Bilder', '⋯ → „Bild oder Foto einfügen“ (am PC auch Strg + V). Mit dem Lasso antippen wählt ein eingefügtes Bild aus: verschieben, Größe ändern, löschen.'),
         li('Text', 'auf die Seite tippen und schreiben (mit dem Pencil geht auch Kritzeln/Scribble).'),
         li('Seitenmenü', '⋯ oben rechts an jeder Seite: Vorlage, Papier, duplizieren, verschieben, löschen.'),
@@ -1846,6 +1860,7 @@ export async function openEditor(root, nbId, embed = null) {
 
   function onKey(e) {
     if (e.target.matches?.('input, textarea')) return;
+    if (document.querySelector('.modal-back')) return; // Dialog offen (z. B. „Berechnen“): Entf löscht nicht die Auswahl
     if (keyOwner && keyOwner !== editor && keyOwner.isConnected) return; // anderer Editor (Notiz/Kartenfenster) ist dran
     const mod = e.ctrlKey || e.metaKey, k = e.key.toLowerCase();
     if (mod && k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); }
