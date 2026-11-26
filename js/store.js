@@ -156,7 +156,7 @@ export const store = {
     for (const k of pdfs) ops.push({ name: 'blobs', op: 'del', key: k });
     ops.push({ name: 'notebooks', op: 'del', key: nb.id }, { name: 'meta', op: 'del', key: 'cover:' + nb.id });
     await this.batch(ops);
-    for (const k of pdfs) await this.delMetaPrefix('pdfbg:' + k + ':');
+    for (const k of pdfs) { await this.delMetaPrefix('pdfbg:' + k + ':'); await this.delMeta('ftext:' + k); } // Seitenbilder, Suchtext
   },
 
   allBlobs: () => db().then(d => new Promise((resolve, reject) => {

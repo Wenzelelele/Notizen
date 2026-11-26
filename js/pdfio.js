@@ -35,6 +35,9 @@ function getPdfjs() {
     return lib;
   })().catch(err => { pdfjsP = null; throw err; }));
 }
+// für den Offline-Check (findui.js): ist pdf.js offline gespeichert? Laden legt es in den Cache des Service Workers
+export const PDF_LIBS = [PDFJS + 'pdf.min.js', PDFJS + 'pdf.worker.min.js'];
+export const loadPdfjs = () => getPdfjs();
 function getJspdf() {
   return (jspdfP ??= loadScript(JSPDF).then(() => window.jspdf).catch(err => { jspdfP = null; throw err; }));
 }
@@ -168,6 +171,49 @@ async function rasterize({ key, n }) {
   c.width = c.height = 0;
   pg.cleanup();
   return blob;
+}
+
+// ---------- Text der PDF-Seiten (für die Suche, find.js) ----------
+// Je Seite die Textstücke mit Lage, relativ zur Seite (0..1): [text, x, y, b, h, zeilenende]. Wird einmal aus dem
+// PDF gelesen und nur auf dem Gerät aufgehoben (meta "ftext:<pdf>", nicht abgeglichen) – geht also auch offline,
+// solange das PDF und pdf.js da sind. Seiten ohne page.pdf (ältere Importe, Fotos) haben keinen Text.
+const TEXT_V = 1;
+export const textKey = key => 'ftext:' + key;
+export async function hasPdfText(key) { return (await store.getMeta(textKey(key)))?.v === TEXT_V; }
+const r4 = v => Math.round(v * 1e4) / 1e4;
+const textJobs = new Map();
+export function pdfText(key) {
+  let p = textJobs.get(key);
+  if (!p) {
+    p = (async () => {
+      const have = await store.getMeta(textKey(key));
+      if (have?.v === TEXT_V) return have.pages;
+      const doc = await openDoc(key);
+      if (!doc) return null; // PDF (noch) nicht auf dem Gerät
+      const U = window.pdfjsLib.Util, pages = [];
+      for (let n = 1; n <= doc.numPages; n++) {
+        const e = docs.get(key);
+        if (e) e.t = Date.now(); // offen halten, solange gelesen wird
+        const pg = await doc.getPage(n);
+        const vp = pg.getViewport({ scale: 1 }), tc = await pg.getTextContent();
+        const items = [];
+        for (const it of tc.items) {
+          if (!it.str?.trim()) { if (it.hasEOL && items.length) items[items.length - 1][5] = 1; continue; }
+          const t = U.transform(vp.transform, it.transform);
+          const fh = Math.hypot(t[2], t[3]);
+          if (!(fh > 0)) continue;
+          const w = it.width * vp.scale;
+          items.push([it.str.replace(/[\uE000-\uF8FF]/g, ' '), r4(t[4] / vp.width), r4((t[5] - fh * 0.86) / vp.height), r4(w / vp.width), r4((fh * 1.12) / vp.height), it.hasEOL ? 1 : 0]);
+        }
+        pages.push(items);
+        pg.cleanup();
+      }
+      await store.setMeta(textKey(key), { v: TEXT_V, pages });
+      return pages;
+    })().finally(() => textJobs.delete(key));
+    textJobs.set(key, p);
+  }
+  return p;
 }
 
 // Hintergrundbild einer Seite (PDF-Seite) oder null, wenn sie keins hat bzw. es (noch) nicht zu bekommen ist.

@@ -22,6 +22,7 @@ import { claudeDialog } from './claude.js';
 import { checkInbox, inboxDialog } from './inbox.js';
 import { storageDialog, shrinkWithProgress } from './storage.js';
 import { mergeDialog } from './merge.js';
+import { contentResults, keywordDialog, offlineCheck, takeLibSearch, LIBQ_KEY, FIND_KEY } from './findui.js';
 
 const COVERS = ['#2f6fed', '#e0533d', '#2e9e6b', '#8a55d6', '#f0a020', '#3b4252', '#d94d8a', '#1a9bb0'];
 const FOLDER_KEY = 'notizen.folder';
@@ -50,6 +51,11 @@ export async function showLibrary(root) {
   const wrap = h('div', { class: 'lib' }, headEl, searchEl, bodyEl);
   root.replaceChildren(wrap);
   function clearSearch() { query = ''; searchInput.value = ''; searchEl.classList.remove('has'); }
+  function setSearch(q) { query = q; searchInput.value = q; searchEl.classList.toggle('has', !!q); renderBody(); wrap.scrollTop = 0; }
+  // zurück aus einem Suchtreffer: dieselbe Suche wieder zeigen, an derselben Stelle
+  let restore = takeLibSearch();
+  if (restore && (restore.folder || null) === current && restore.q) { query = restore.q; searchInput.value = query; searchEl.classList.add('has'); }
+  else restore = null;
 
   // ---------- Ordnerbaum ----------
   // Nachschlage-Tabellen statt bei jeder Frage alle Ordner/Notizen durchzugehen (index() läuft vor jedem Aufbau)
@@ -154,6 +160,8 @@ export async function showLibrary(root) {
     const here = path[path.length - 1] || null;
     const cardsHere = isCardFolder(here); // im Karteikarten-Ordner eines Fachs
     const learnable = cardsUnder(current), due = dueCount(learnable);
+    // in einem Ordner sucht das Feld auch im Text der Skripte (Ordner samt Unterordnern)
+    searchInput.placeholder = here && !cardsHere ? `In „${here.name}“ suchen – auch im Skripttext` : 'Notizen und Ordner suchen';
     syncBtn = syncButton();
     drawBanner();
     headEl.replaceChildren(...[
@@ -180,6 +188,8 @@ export async function showLibrary(root) {
   // Inhalt unter dem Suchfeld: der geöffnete Ordner – oder, solange etwas im Suchfeld steht, die Treffer
   function renderBody() {
     coverNbs.clear();
+    stopContent?.();
+    stopContent = null;
     const parts = query.trim() ? searchParts() : folderParts();
     bodyEl.replaceChildren(...parts.filter(Boolean));
     watchCovers();
@@ -202,13 +212,50 @@ export async function showLibrary(root) {
       notes.length ? h('section', {}, subs.length || flash.length || recent.length ? h('h3', { class: 'sec-title' }, 'Notizen') : null, h('div', { class: 'grid' }, notes.map(nb => card(nb)))) : null,
       !subs.length && !notes.length && !flash.length ? empty(here) : null];
   }
-  // Suche über alle Ordner: jedes Wort muss im Titel (Notiz) bzw. Namen (Ordner) vorkommen
+  // Suche: auf der obersten Ebene über alle Ordner, jedes Wort muss im Titel (Notiz) bzw. Namen (Ordner) vorkommen.
+  // In einem Ordner nur dort (samt Unterordnern) – und zuerst im Text der Skripte (find.js).
+  let stopContent = null, contentT = 0;
+  const scopeNotesOf = fid => {
+    const order = descendants(fid).filter(id => !isCardFolder(byId(id))), ids = new Set(order);
+    return notebooks.filter(nb => !isCard(nb) && ids.has(folderOf(nb)))
+      .sort((a, b) => order.indexOf(folderOf(a)) - order.indexOf(folderOf(b)) || byOrder(a, b) || byDate(a, b));
+  };
+  const scopeNotes = () => scopeNotesOf(current);
+  function openHit(nb, pageId) {
+    try {
+      sessionStorage.setItem(LIBQ_KEY, JSON.stringify({ folder: current, q: query, scroll: wrap.scrollTop }));
+      sessionStorage.setItem(FIND_KEY, JSON.stringify({ nb: nb.id, page: pageId, q: query }));
+    } catch { /* egal */ }
+    location.hash = 'nb/' + nb.id;
+  }
+  async function showKeywords() {
+    const here = byId(current);
+    const term = await keywordDialog(scopeNotes(), here?.name);
+    if (term) setSearch(term);
+  }
   function searchParts() {
     const words = norm(query).split(/\s+/).filter(Boolean);
     const hit = t => { const x = norm(t); return words.every(w => x.includes(w)); };
-    const fs = folders.filter(f => !isCardFolder(f) && hit(f.name)).sort(byName);
-    const ns = notebooks.filter(nb => !isCard(nb) && hit(nb.title)).sort(byDate);
+    const inFolder = current && !isCardFolder(byId(current));
+    const scope = inFolder ? new Set(descendants(current)) : null;
+    const fs = folders.filter(f => !isCardFolder(f) && hit(f.name) && (!scope || (f.id !== current && scope.has(f.id)))).sort(byName);
+    const ns = notebooks.filter(nb => !isCard(nb) && hit(nb.title) && (!scope || scope.has(folderOf(nb)))).sort(byDate);
     const MAX = 60;
+    if (inFolder) {
+      const host = h('div', { class: 'fr-host' });
+      const q = query, nbs = scopeNotes();
+      clearTimeout(contentT);
+      // erst kurz nach dem letzten Tastendruck suchen
+      contentT = setTimeout(() => {
+        if (!host.isConnected || q !== query) return;
+        stopContent = contentResults(host, { nbs, query: q, open: openHit, onKeywords: showKeywords,
+          onDone: () => { if (restore) { wrap.scrollTop = restore.scroll || 0; restore = null; } } });
+      }, restore ? 0 : 200);
+      return [host,
+        ns.length ? h('section', {}, h('h3', { class: 'sec-title' }, `Titel · ${ns.length}`),
+          h('div', { class: 'grid' }, ns.slice(0, MAX).map(nb => card(nb, folderPath(folderOf(nb)))))) : null,
+        fs.length ? h('section', {}, h('h3', { class: 'sec-title' }, `Ordner · ${fs.length}`), h('div', { class: 'fgrid' }, fs.slice(0, 24).map(folderCard))) : null];
+    }
     if (!fs.length && !ns.length) {
       return [h('div', { class: 'empty' }, h('div', { class: 'empty-ico' }, icon('search')), h('h2', {}, 'Nichts gefunden'),
         h('p', { class: 'muted' }, `Keine Notiz und kein Ordner mit „${query.trim()}“ im Namen.`))];
@@ -527,6 +574,9 @@ export async function showLibrary(root) {
         await store.put('folders', f);
         render();
       } },
+      { icon: 'search', label: 'Stichwortverzeichnis', onClick: () => { if (current !== f.id) go(f.id); showKeywords(); } },
+      { icon: 'check', label: 'Offline-Check (Klausur)', onClick: () => offlineCheck(scopeNotesOf(f.id), f.name).then(() => reload()) },
+      { sep: true },
       { icon: 'file', label: 'Lange Seiten aufteilen …', onClick: async () => {
         const ids = descendants(f.id); // samt Unterordnern
         if (await splitDialog(notebooks.filter(n => ids.includes(n.folderId)))) await reload();
@@ -771,6 +821,8 @@ export async function showLibrary(root) {
   const inboxT = setInterval(pollInbox, 60000);
   document.addEventListener('visibilitychange', pollInbox);
   return () => {
+    stopContent?.();
+    clearTimeout(contentT);
     scrollPos.set(current || '', wrap.scrollTop);
     clearInterval(inboxT);
     document.removeEventListener('visibilitychange', pollInbox);

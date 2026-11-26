@@ -467,3 +467,55 @@ img[data-cover]:not([src]) { visibility: hidden; }
 .train-prompt b { font-size: 30px; margin-left: 4px; }
 .train-pad { display: block; width: 100%; height: 220px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel2); touch-action: none; }
 .train-btns { justify-content: flex-start; margin: 8px 0 4px; }
+
+/* ---------- Volltextsuche (findui.js) ---------- */
+.fr-status { margin: 18px 2px 0; }
+.fr-top { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.fr-top .linkbtn { font-size: 13px; }
+.fr-group { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; margin-bottom: 14px; overflow: hidden; }
+.fr-head { display: flex; align-items: center; gap: 10px; padding: 11px 14px; border-bottom: 1px solid var(--line); }
+.fr-head svg { width: 18px; height: 18px; color: var(--muted); flex: none; }
+.fr-head b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fr-hit { display: flex; gap: 12px; width: 100%; text-align: left; border: 0; border-top: 1px solid var(--line); background: none; color: inherit; font: inherit; padding: 11px 14px; cursor: pointer; }
+.fr-list > .fr-hit:first-child { border-top: 0; }
+.fr-hit:active { background: var(--panel2); }
+@media (hover: hover) { .fr-hit:hover { background: var(--panel2); } }
+.fr-page { flex: none; min-width: 44px; height: 24px; display: grid; place-items: center; padding: 0 6px; border-radius: 7px; background: var(--accent-soft); color: var(--accent); font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.fr-body { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.fr-title { font-size: 14px; }
+.fr-snip { font-size: 14px; color: var(--muted); line-height: 1.45; overflow-wrap: anywhere; }
+.fr-snip mark, .fr-title mark { background: #ffe066; color: #1c1c1e; border-radius: 3px; padding: 0 1px; }
+.fr-more { display: block; margin: 10px 14px 12px; font-size: 14px; }
+
+/* Suchleiste in der Notiz und markierte Fundstellen */
+.findbar { position: absolute; top: 10px; right: 10px; z-index: 20; display: flex; align-items: center; gap: 2px; padding: 4px 4px 4px 10px;
+  width: min(420px, calc(100% - 20px)); background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); }
+.findbar > svg { width: 18px; height: 18px; color: var(--muted); flex: none; }
+.findbar .input { flex: 1; min-width: 0; border: 0; background: transparent; padding: 8px 6px; -webkit-appearance: none; appearance: none; }
+.findbar .input:focus { outline: none; }
+.findbar .input::-webkit-search-cancel-button { display: none; }
+.fb-count { font-size: 13px; color: var(--muted); white-space: nowrap; padding: 0 6px; font-variant-numeric: tabular-nums; }
+.findbar.none .fb-count { color: var(--danger); }
+.fhl-layer { position: absolute; inset: 0; pointer-events: none; z-index: 2; }
+.fhl { position: absolute; background: rgba(255, 214, 0, .38); mix-blend-mode: multiply; border-radius: 2px; }
+.fhl.cur { background: rgba(255, 140, 0, .5); box-shadow: 0 0 0 2px #ff8c00; }
+
+/* Stichwortverzeichnis */
+.modal.wide { width: min(760px, 100%); }
+.kw .input { margin: 4px 0 12px; }
+.kw-list { max-height: 58vh; overflow: auto; }
+.kw-group { display: flex; gap: 12px; padding: 8px 0; border-top: 1px solid var(--line); }
+.kw-letter { flex: none; width: 22px; font-weight: 700; color: var(--accent); padding-top: 5px; }
+.kw-terms { display: flex; flex-wrap: wrap; gap: 6px; }
+.kw-term { border: 1px solid var(--line); background: var(--panel2); color: inherit; font: inherit; font-size: 14px; padding: 5px 9px; border-radius: 8px; cursor: pointer; }
+.kw-term.head { font-weight: 600; }
+.kw-n { margin-left: 6px; font-size: 11px; color: var(--muted); font-weight: 400; }
+
+/* Offline-Check */
+.oc-sum { font-weight: 600; margin: 0 0 4px; }
+.oc-sum.ok { color: #2e9e6b; }
+.oc-sum.warn { color: #c77700; }
+.oc-list { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+.oc-row { display: flex; gap: 10px; align-items: flex-start; }
+.oc-ico { flex: none; width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-size: 13px; font-weight: 700; color: #fff; background: #2e9e6b; margin-top: 1px; }
+.oc-row.warn .oc-ico { background: #e0a020; }

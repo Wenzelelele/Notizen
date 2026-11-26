@@ -1,11 +1,11 @@
 // Offline-Fähigkeit: App-Dateien kommen aus dem Cache. Jede veröffentlichte Version hat ihren eigenen Cache
 // (build-web.js setzt den Namen): Der neue Service Worker füllt ihn komplett, erst dann löst er den alten ab –
 // alte und neue Dateien werden so nie gemischt. Notizen selbst liegen ohnehin im Gerät.
-const CACHE = 'notizen-v1795522023915';
+const CACHE = 'notizen-v1795708200109';
 const SHELL = [
   './', 'index.html', 'manifest.json', 'icon.svg', 'icon-180.png', 'icon-512.png', 'css/style.css',
   'js/main.js', 'js/library.js', 'js/editor.js', 'js/ink.js', 'js/ui.js', 'js/store.js',
-  'js/pdfio.js', 'js/onenote.js', 'js/sync.js', 'js/cloud.js', 'js/config.js', 'js/srs.js', 'js/cards.js', 'js/review.js', 'js/occlusion.js', 'js/version.js', 'js/split.js', 'js/claude.js', 'js/inbox.js', 'js/storage.js', 'js/pagenav.js', 'js/merge.js', 'js/covers.js', 'js/calc.js', 'js/calcui.js',
+  'js/pdfio.js', 'js/onenote.js', 'js/sync.js', 'js/cloud.js', 'js/config.js', 'js/srs.js', 'js/cards.js', 'js/review.js', 'js/occlusion.js', 'js/version.js', 'js/split.js', 'js/claude.js', 'js/inbox.js', 'js/storage.js', 'js/pagenav.js', 'js/merge.js', 'js/covers.js', 'js/calc.js', 'js/calcui.js', 'js/find.js', 'js/findui.js',
 ];
 // PDF-Bibliotheken (pdfio.js): Seit PDFs als Original abgeglichen werden, zeichnet jedes Gerät die Seitenbilder
 // selbst – das muss auch ohne Internet gehen. Feste Versionen, ändern sich nie.

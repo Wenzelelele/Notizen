@@ -1,4 +1,5 @@
 // Notizbuch-Editor: Seiten anzeigen, mit Stift/Maus zeichnen, Lasso, Text, Rückgängig, Zoom.
+import { createFindBar, takeFind } from './findui.js';
 import { store, uid, newPage, changes, PAGE_SIZES } from './store.js';
 import * as ink from './ink.js';
 import { h, icon, menu, modal, confirmDialog, promptText, toast, progress, pickFiles, download, safeName } from './ui.js';
@@ -115,7 +116,7 @@ export async function openEditor(root, nbId, embed = null) {
       : h('header', { class: 'ed-top' },
         btn('back', 'Zurück', goBack),
         card ? null : btn('pages', 'Seitenübersicht', () => toggleNav()),
-        titleEl, h('div', { class: 'grow' }), syncWarn, pageLabel, undoBtn, redoBtn,
+        titleEl, h('div', { class: 'grow' }), syncWarn, card ? null : btn('search', 'In Notiz suchen', () => openFind()), pageLabel, undoBtn, redoBtn,
         card ? null : btn('pagePlus', 'Seite hinzufügen', () => addPageAfter(currentIndex())),
         btn('more', 'Mehr', e => moreMenu(e.currentTarget))),
     embed ? null : toolsEl, body);
@@ -1464,6 +1465,32 @@ export async function openEditor(root, nbId, embed = null) {
   }
   const saveNb = () => store.put('notebooks', nb);
 
+  // ---------- Suchen in der Notiz (findui.js) ----------
+  // Treffer im Text der PDF-Folien und im getippten Text; die Leiste schwebt oben rechts über den Seiten
+  let finder = null;
+  function openFind(q = null, pageId = null) {
+    finder ??= createFindBar({
+      host: stage,
+      pages: () => E.pages,
+      pageEl: id => E.pvs.get(id)?.el,
+      visiblePage: () => currentIndex(),
+      show: (pageId, rect) => {
+        const pv = E.pvs.get(pageId);
+        if (!pv) return;
+        stopInertia();
+        const r = pv.el.getBoundingClientRect(), sr = scroller.getBoundingClientRect();
+        // Fundstelle ins obere Drittel, damit darunter der Zusammenhang zu sehen ist
+        scroller.scrollTop += r.top + rect.y * r.height - (sr.top + sr.height * 0.3);
+        const x0 = r.left + rect.x * r.width, x1 = x0 + rect.w * r.width;
+        if (x0 < sr.left + 16 || x1 > sr.right - 16) scroller.scrollLeft += (x0 + x1) / 2 - (sr.left + sr.width / 2);
+        updateVisible();
+        updatePageLabel();
+      },
+      onClose: () => { finder = null; },
+    });
+    finder.open(q, pageId);
+  }
+
   // ---------- Seitenverwaltung ----------
   function currentIndex() {
     const sr = scroller.getBoundingClientRect(), mid = sr.top + sr.height / 2;
@@ -1680,7 +1707,8 @@ export async function openEditor(root, nbId, embed = null) {
         li('Formen-Schalter', 'jede gezeichnete Form wird automatisch begradigt.'),
         li('Lasso', 'Inhalt umkreisen → verschieben, löschen, duplizieren, umfärben oder kopieren. An den vier Eckpunkten ziehen ändert die Größe.'),
         li('Rechnen', 'Rechnung mit dem Lasso einkreisen → „Berechnen“: Die App liest die Handschrift, rechnet aus und schreibt das Ergebnis daneben. Falsch erkannte Zeichen antippen und korrigieren – sie lernt deine Schrift.'),
-        li('Bilder', '⋯ → „Bild oder Foto einfügen“ (am PC auch Strg + V). Mit dem Lasso antippen wählt ein eingefügtes Bild aus: verschieben, Größe ändern, löschen.'),
+        li('Suchen', 'Lupe oben (am PC Strg + F) sucht im Text der PDF-Folien und im getippten Text dieser Notiz. In einem Ordner der Übersicht sucht das Suchfeld in allen Skripten des Ordners; ⋯ am Ordner → Stichwortverzeichnis und Offline-Check. Handschrift ist nicht durchsuchbar.'),
+        li('Bilder','⋯ → „Bild oder Foto einfügen“ (am PC auch Strg + V). Mit dem Lasso antippen wählt ein eingefügtes Bild aus: verschieben, Größe ändern, löschen.'),
         li('Text', 'auf die Seite tippen und schreiben (mit dem Pencil geht auch Kritzeln/Scribble).'),
         li('Seitenmenü', '⋯ oben rechts an jeder Seite: Vorlage, Papier, duplizieren, verschieben, löschen.'),
         li('Am PC', 'Maus zeichnet, Strg + Mausrad zoomt, Strg + Z / Strg + Y.')),
@@ -1863,7 +1891,8 @@ export async function openEditor(root, nbId, embed = null) {
     if (document.querySelector('.modal-back')) return; // Dialog offen (z. B. „Berechnen“): Entf löscht nicht die Auswahl
     if (keyOwner && keyOwner !== editor && keyOwner.isConnected) return; // anderer Editor (Notiz/Kartenfenster) ist dran
     const mod = e.ctrlKey || e.metaKey, k = e.key.toLowerCase();
-    if (mod && k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); }
+    if (mod && k === 'f' && !card && !embed) { e.preventDefault(); openFind(); }
+    else if (mod && k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); }
     else if (mod && k === 'y') { e.preventDefault(); redo(); }
     else if ((e.key === 'Delete' || e.key === 'Backspace') && E.sel) { e.preventDefault(); deleteSel(); }
   }
@@ -1969,6 +1998,10 @@ export async function openEditor(root, nbId, embed = null) {
     scroller.scrollTop += pr.top - sr.top - 12;
     updateVisible();
   }
+  if (!card && !embed) { // aus der Suche in der Bibliothek: gleich zur Fundstelle
+    const f = takeFind();
+    if (f?.nb === nb.id && f.q) openFind(f.q, f.page);
+  }
   if (card && !embed) { // frisch aus einem Ausschnitt angelegt: kurz sagen, was jetzt zu tun ist
     let side = null;
     try { side = sessionStorage.getItem('notizen.hint:' + nb.id); sessionStorage.removeItem('notizen.hint:' + nb.id); } catch { /* egal */ }
@@ -1976,6 +2009,7 @@ export async function openEditor(root, nbId, embed = null) {
   }
 
   const destroy = async () => {
+    finder?.close();
     await closeCardPanel();
     if (!embed) saveView();
     for (const ta of editor.querySelectorAll('.text-edit')) ta.blur();
