@@ -1,7 +1,7 @@
 // Bibliothek: Ordner (beliebig verschachtelt), Notizbücher, Import (OneNote, PDF), Backup.
 import { store, uid, newNotebook, newPage, exportBackup, importBackup } from './store.js';
 import { h, icon, menu, modal, confirmDialog, promptText, toast, progress, pickFiles, download, seg, field, safeName } from './ui.js';
-import { importPdf, exportPdf } from './pdfio.js';
+import { importPdf, exportPdf, attachPdfText } from './pdfio.js';
 import { loadIndex, importPage, hid } from './onenote.js';
 import { syncDialog, syncEvents, syncStatus, syncProblem } from './sync.js';
 import { hasCover, cachedCover, loadCover, pauseCovers, adoptThumbs, coverEvents } from './covers.js';
@@ -435,7 +435,7 @@ export async function showLibrary(root) {
 
   // ---------- Notizen ----------
   async function newNotebookDialog() {
-    let color = COVERS[notebooks.length % COVERS.length], template = 'lined', paper = 'white', size = 'a4p';
+    let color = COVERS[notebooks.length % COVERS.length], template = 'lined', paper = 'white', size = 'a4p', typed = false;
     const title = h('input', { class: 'input', value: 'Neue Notiz', 'aria-label': 'Titel' });
     const preview = k => {
       const c = h('canvas', { width: 108, height: 152 });
@@ -452,6 +452,11 @@ export async function showLibrary(root) {
       title: 'Neue Notiz',
       body: h('div', { class: 'form' },
         field('Titel', title),
+        field('Art', seg([[false, 'Handschrift'], [true, 'Getippt (z. B. Cheatsheet)']], typed, v => {
+          typed = v;
+          if (v && title.value === 'Neue Notiz') title.value = 'Cheatsheet';
+          if (v) { template = 'blank'; drawTpl(); }
+        })),
         field('Cover', seg(COVERS.map(c => [c, '']), color, v => { color = v; }, c => h('i', { class: 'cdot', style: { background: c } }), 'covers')),
         field('Vorlage', tplBox),
         field('Papier', seg(PAPER_NAMES, paper, v => { paper = v; drawTpl(); })),
@@ -461,6 +466,7 @@ export async function showLibrary(root) {
     });
     if (!ok) return;
     const nb = newNotebook({ title: title.value.trim() || 'Unbenannt', color, template, paper, size, folderId: current });
+    if (typed) nb.typed = true; // öffnet mit dem Textwerkzeug, Textfelder über die ganze Breite (editor.js)
     const p = newPage(nb);
     nb.pageIds = [p.id];
     await store.put('pages', p);
@@ -479,6 +485,7 @@ export async function showLibrary(root) {
       { icon: 'download', label: 'Als PDF exportieren', onClick: () => exportNb(nb) },
       { icon: 'file', label: 'In Seiten aufteilen', onClick: async () => { if (await splitDialog([nb])) await reload(); } },
       { icon: 'copy', label: 'Mit anderer Notiz zusammenführen …', onClick: async () => { if (await mergeDialog(nb, notebooks)) await reload(); } },
+      nb.kind === 'pdf' && { icon: 'search', label: 'Durchsuchbar machen (Original-PDF wählen) …', onClick: () => pdfTextFor(nb) },
       (nb.kind === 'pdf' || nb.kind === 'onenote') && { icon: 'download', label: 'Speicher verkleinern', onClick: async () => { await shrinkWithProgress([nb]); await reload(); } },
       { sep: true },
       { icon: 'trash', label: 'Löschen', danger: true, onClick: async () => {
@@ -488,6 +495,28 @@ export async function showLibrary(root) {
         toast('Notiz gelöscht');
       } },
     ]);
+  }
+
+  // Text aus dem Original-PDF übernehmen (ältere Importe haben nur Seitenbilder – siehe pdfio.attachPdfText)
+  function pdfTextFor(nb) {
+    pickFiles('application/pdf,.pdf').then(async ([f]) => {
+      if (!f) return;
+      const pr = progress('Text wird übernommen …');
+      try {
+        const r = await attachPdfText(nb, f, (i, n) => pr.set(`Seite ${i} von ${n}`, i / n));
+        pr.close();
+        await modal({
+          title: r.withText ? 'Notiz ist jetzt durchsuchbar' : 'Kein Text im PDF',
+          body: h('div', {},
+            h('p', {}, r.withText ? `Text von ${r.withText} Seiten übernommen. Deine Handschrift bleibt, wie sie ist.`
+              : 'Dieses PDF enthält keinen Text – vermutlich eingescannte Seiten. Durchsuchbar wird es so leider nicht.'),
+            r.pages !== r.pdfPages ? h('p', { class: 'muted small' }, `Achtung: Die Notiz hat ${r.pages} Folienseiten, das PDF ${r.pdfPages}. Die Seiten wurden der Reihe nach zugeordnet – ist es das richtige PDF?`) : null),
+        });
+      } catch (err) {
+        console.error(err);
+        toast('Das hat nicht geklappt: ' + err.message);
+      } finally { pr.close(); }
+    });
   }
 
   async function coverDialog(nb) {

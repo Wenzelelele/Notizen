@@ -182,6 +182,21 @@ export const textKey = key => 'ftext:' + key;
 export async function hasPdfText(key) { return (await store.getMeta(textKey(key)))?.v === TEXT_V; }
 const r4 = v => Math.round(v * 1e4) / 1e4;
 const textJobs = new Map();
+// Textstücke einer pdf.js-Seite
+async function pageTextItems(pg) {
+  const U = window.pdfjsLib.Util, vp = pg.getViewport({ scale: 1 }), tc = await pg.getTextContent();
+  const items = [];
+  for (const it of tc.items) {
+    if (!it.str?.trim()) { if (it.hasEOL && items.length) items[items.length - 1][5] = 1; continue; }
+    const t = U.transform(vp.transform, it.transform);
+    const fh = Math.hypot(t[2], t[3]);
+    if (!(fh > 0)) continue;
+    const w = it.width * vp.scale;
+    // Symbolzeichen (Pfeile, Häkchen aus Symbolschriften) → Leerzeichen
+    items.push([it.str.replace(/[\uE000-\uF8FF]/g, ' '), r4(t[4] / vp.width), r4((t[5] - fh * 0.86) / vp.height), r4(w / vp.width), r4((fh * 1.12) / vp.height), it.hasEOL ? 1 : 0]);
+  }
+  return items;
+}
 export function pdfText(key) {
   let p = textJobs.get(key);
   if (!p) {
@@ -190,22 +205,12 @@ export function pdfText(key) {
       if (have?.v === TEXT_V) return have.pages;
       const doc = await openDoc(key);
       if (!doc) return null; // PDF (noch) nicht auf dem Gerät
-      const U = window.pdfjsLib.Util, pages = [];
+      const pages = [];
       for (let n = 1; n <= doc.numPages; n++) {
         const e = docs.get(key);
         if (e) e.t = Date.now(); // offen halten, solange gelesen wird
         const pg = await doc.getPage(n);
-        const vp = pg.getViewport({ scale: 1 }), tc = await pg.getTextContent();
-        const items = [];
-        for (const it of tc.items) {
-          if (!it.str?.trim()) { if (it.hasEOL && items.length) items[items.length - 1][5] = 1; continue; }
-          const t = U.transform(vp.transform, it.transform);
-          const fh = Math.hypot(t[2], t[3]);
-          if (!(fh > 0)) continue;
-          const w = it.width * vp.scale;
-          items.push([it.str.replace(/[\uE000-\uF8FF]/g, ' '), r4(t[4] / vp.width), r4((t[5] - fh * 0.86) / vp.height), r4(w / vp.width), r4((fh * 1.12) / vp.height), it.hasEOL ? 1 : 0]);
-        }
-        pages.push(items);
+        pages.push(await pageTextItems(pg));
         pg.cleanup();
       }
       await store.setMeta(textKey(key), { v: TEXT_V, pages });
@@ -242,12 +247,13 @@ export async function importPdf(file, { notebook, folderId = null, title, meta, 
   const name = title || file.name?.replace(/\.pdf$/i, '') || 'PDF';
   const nb = notebook || Object.assign(newNotebook({ title: name, folderId, template: 'blank', color: '#5b6475' }), { kind: 'pdf' }, meta);
   const key = pdfKey || 'pdf_' + uid();
-  const added = [];
+  const added = [], texts = [];
   let rasterBytes = 0;
   try {
     for (let i = 1; i <= doc.numPages; i++) {
       onProgress?.(i, doc.numPages);
       const pg = await doc.getPage(i);
+      texts.push(await pageTextItems(pg).catch(() => []));
       const { c, base } = await rasterCanvas(pg, 'print');
       const blob = await encodeImage(c, 0.85, 0.82);
       c.width = c.height = 0;
@@ -266,7 +272,9 @@ export async function importPdf(file, { notebook, folderId = null, title, meta, 
     // Fotos) oder zu groß zum Hochladen, dann wie früher die Seitenbilder selbst.
     if (file.size <= MAX_PDF && file.size < rasterBytes) {
       await store.putBlob(key, file.slice(0, file.size, 'application/pdf'));
+      await store.setMeta(textKey(key), { v: TEXT_V, pages: texts }); // Suchtext gleich da (find.js)
     } else {
+      added.forEach((p, i) => { if (texts[i]?.length) p.ptext = texts[i]; }); // Text bleibt durchsuchbar
       for (const p of added) {
         const k = rasterKey(p), blob = await store.getMeta(k);
         if (blob) await store.putBlob(p.bg, blob);
@@ -284,6 +292,29 @@ export async function importPdf(file, { notebook, folderId = null, title, meta, 
   nb.pageIds.push(...added.map(p => p.id));
   await store.put('notebooks', nb);
   return { notebook: nb, pages: added };
+}
+
+// Text aus dem Original-PDF in eine vorhandene Notiz übernehmen – für Notizen, deren PDF nicht (mehr) da ist
+// (Importe vor dem 10.11.2026 haben nur Seitenbilder). Handschrift und Seiten bleiben unverändert: Jede Seite mit
+// Folienbild bekommt der Reihe nach den Text der nächsten PDF-Seite (page.ptext, klein, wird abgeglichen).
+// Ergebnis: { pages: Folienseiten der Notiz, pdfPages: Seiten im PDF, withText: Seiten mit Text }
+export async function attachPdfText(nb, file, onProgress) {
+  const lib = await getPdfjs();
+  const doc = await lib.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise;
+  try {
+    const pages = (await store.getMany('pages', nb.pageIds || [])).filter(p => p && p.bg);
+    const n = Math.min(pages.length, doc.numPages);
+    let withText = 0;
+    for (let i = 0; i < n; i++) {
+      onProgress?.(i + 1, n);
+      const pg = await doc.getPage(i + 1);
+      const items = await pageTextItems(pg);
+      pg.cleanup();
+      if (items.length) { pages[i].ptext = items; withText++; } else delete pages[i].ptext;
+    }
+    await store.batch(pages.slice(0, n).map(p => ({ name: 'pages', op: 'put', value: p })));
+    return { pages: pages.length, pdfPages: doc.numPages, withText };
+  } finally { doc.destroy(); }
 }
 
 export async function exportPdf(pages, onProgress) {

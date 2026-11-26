@@ -68,10 +68,11 @@ function textItems(page) {
   const out = [], W = page.w || 794, H = page.h || 1123;
   for (const t of page.texts || []) {
     const lh = (t.size || 16) * 1.3;
+    let off = 0;
     (t.text || '').split('\n').forEach((line, i) => {
-      if (!line.trim()) return;
-      const w = Math.min(t.w || 400, line.length * (t.size || 16) * 0.55);
-      out.push([line, t.x / W, (t.y + i * lh) / H, w / W, lh / H, 1]);
+      // [7], [8]: Textfeld und Stelle im Text – damit markiert der Editor genau (findui.js, domRects)
+      if (line.trim()) out.push([line, t.x / W, (t.y + i * lh) / H, Math.min(t.w || 400, line.length * (t.size || 16) * 0.55) / W, lh / H, 1, 0, t.id, off]);
+      off += line.length + 1;
     });
   }
   return out;
@@ -100,7 +101,8 @@ export async function docsFor(pages, onPdf) {
   }
   const docs = pages.map(p => {
     if (!p || p.missing) return null;
-    const items = [...(p.pdf ? texts.get(p.pdf.key)?.[p.pdf.n - 1] || [] : []), ...textItems(p)];
+    // PDF-Text: aus dem Original-PDF (page.pdf) oder bei Seiten ohne Original mitgespeichert (page.ptext)
+    const items = [...(p.pdf ? texts.get(p.pdf.key)?.[p.pdf.n - 1] || [] : p.ptext || []), ...textItems(p)];
     return buildDoc(items, (p.h || 1123) / (p.w || 794));
   });
   return { docs, complete };
@@ -233,8 +235,9 @@ function collect(index, terms, any) {
   return { terms, groups, total, partial: false };
 }
 
-// Treffer auf der Seite als Rechtecke (relativ zur Seite, 0..1)
-export function hitRects(doc, hit) {
+// Treffer auf der Seite als Rechtecke (relativ zur Seite, 0..1).
+// exact(item, c0, c1): genaue Rechtecke für ein Textstück, falls bekannt (getippter Text im Editor), sonst null
+export function hitRects(doc, hit, exact = null) {
   const by = new Map();
   for (let n = hit.a; n < hit.b; n++) {
     const r = doc.n2r[n], it = doc.rItem[r];
@@ -242,9 +245,9 @@ export function hitRects(doc, hit) {
     const c = doc.rChar[r], e = by.get(it);
     if (!e) by.set(it, [c, c]); else { e[0] = Math.min(e[0], c); e[1] = Math.max(e[1], c); }
   }
-  return [...by].map(([it, [c0, c1]]) => {
+  return [...by].flatMap(([it, [c0, c1]]) => {
     const I = doc.items[it], L = I[0].length || 1;
-    return { x: I[1] + (I[3] * c0) / L, y: I[2], w: (I[3] * (c1 - c0 + 1)) / L, h: I[4] };
+    return exact?.(I, c0, c1) || [{ x: I[1] + (I[3] * c0) / L, y: I[2], w: (I[3] * (c1 - c0 + 1)) / L, h: I[4] }];
   });
 }
 

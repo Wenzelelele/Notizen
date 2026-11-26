@@ -75,7 +75,10 @@ export async function openEditor(root, nbId, embed = null) {
       localStorage.setItem('notizen.recent', JSON.stringify([nb.id, ...rec].slice(0, 8)));
     } catch { /* egal */ }
   }
-  if (card && !embed && S.tool === 'card') S.tool = 'pen'; // im Kartenfenster wechselt erst der erste Strich (onDown)
+  if (card && !embed && S.tool === 'card') S.tool = 'pen';
+  // getippte Notiz (Cheatsheet): gleich mit dem Textwerkzeug – ohne es für andere Notizen zu merken
+  const toolBefore = S.tool;
+  if (nb.typed && !embed) S.tool = 'text'; // im Kartenfenster wechselt erst der erste Strich (onDown)
   // "Zurück" führt dorthin, woher man kam (z. B. vom Skript zur neuen Karte und wieder zurück)
   const RETURN_KEY = 'notizen.return:' + nb.id;
   function goBack() {
@@ -1378,35 +1381,63 @@ export async function openEditor(root, nbId, embed = null) {
     }
     return null;
   }
+  // Tippen mit dem Finger (Textwerkzeug): im touchend-Handler fokussieren, sonst zeigt das iPad keine Tastatur
+  function textTap(cx, cy) {
+    const act = document.activeElement;
+    if (act?.classList?.contains('text-edit')) { act.blur(); return; } // offenes Textfeld: erst einmal abschließen
+    const el = document.elementsFromPoint(cx, cy).find(x => x.classList?.contains('page'));
+    const pv = el && E.pvs.get(el.dataset.id);
+    if (!pv || pv.page.missing) return;
+    const pt = toPage(pv, { clientX: cx, clientY: cy });
+    editText(pv, hitText(pv, pt), pt);
+  }
+  // Seite nach unten verlängern, wenn Text darüber hinausläuft (nur Seiten ohne PDF-/Bildhintergrund)
+  function growPage(pv, bottom) {
+    const page = pv.page;
+    if (page.bg || bottom + 40 <= page.h) return;
+    page.h = Math.ceil(bottom + 240);
+    unrender(pv);
+    buildTiles(pv);
+    layoutAll();
+    updateVisible();
+    markDirty(page);
+  }
   function editText(pv, t, pt) {
     const s = E.scale, page = pv.page;
     const size = t ? t.size : SIZES.text[S.size.text];
     const color = t ? t.color : S.penColor;
-    const x = t ? t.x : Math.max(4, Math.min(pt.x, page.w - 160));
+    // getippte Notiz (Cheatsheet): Textfelder über die ganze Seitenbreite
+    const x = t ? t.x : nb.typed ? 48 : Math.max(4, Math.min(pt.x, page.w - 160));
     const y = t ? t.y : Math.max(4, pt.y - size * 0.65);
-    const w = t ? t.w : Math.min(420, page.w - x - 24);
+    const w = t ? t.w : nb.typed ? page.w - 96 : Math.min(420, page.w - x - 24);
     const ta = h('textarea', { class: 'text-edit', spellcheck: true, 'aria-label': 'Text' });
     ta.value = t?.text || '';
     Object.assign(ta.style, { left: x * s + 'px', top: y * s + 'px', width: w * s + 'px', fontSize: size * s + 'px', color });
     const div = t && pv.texts.querySelector(`[data-id="${t.id}"]`);
     if (div) div.style.visibility = 'hidden';
-    const fit = () => { ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px'; };
+    const fit = () => {
+      ta.style.height = 'auto';
+      ta.style.height = ta.scrollHeight + 'px';
+      growPage(pv, y + ta.scrollHeight / E.scale);
+    };
     ta.addEventListener('input', fit);
     ta.addEventListener('keydown', e => { e.stopPropagation(); if (e.key === 'Escape') ta.blur(); });
     ta.addEventListener('blur', () => {
       const v = ta.value.replace(/\s+$/, '');
       ta.remove();
       if (div) div.style.visibility = '';
-      const before = snap(page);
+      const before = snap(page), id = t ? t.id : uid();
       if (t) {
         if (v === t.text) return;
         page.texts = v ? page.texts.map(x2 => (x2.id === t.id ? { ...x2, text: v } : x2)) : page.texts.filter(x2 => x2.id !== t.id);
       } else {
         if (!v) return;
-        page.texts = [...page.texts, { id: uid(), x: r2(x), y: r2(y), w: r2(w), size, color, text: v }];
+        page.texts = [...page.texts, { id, x: r2(x), y: r2(y), w: r2(w), size, color, text: v }];
       }
       commit(pv, before);
       renderTexts(pv);
+      const d = v && pv.texts.querySelector(`[data-id="${id}"]`);
+      if (d) growPage(pv, y + d.offsetHeight / E.scale);
     }, { once: true });
     pv.el.append(ta);
     fit();
@@ -1709,7 +1740,7 @@ export async function openEditor(root, nbId, embed = null) {
         li('Rechnen', 'Rechnung mit dem Lasso einkreisen → „Berechnen“: Die App liest die Handschrift, rechnet aus und schreibt das Ergebnis daneben. Falsch erkannte Zeichen antippen und korrigieren – sie lernt deine Schrift.'),
         li('Suchen', 'Lupe oben (am PC Strg + F) sucht im Text der PDF-Folien und im getippten Text dieser Notiz. In einem Ordner der Übersicht sucht das Suchfeld in allen Skripten des Ordners; ⋯ am Ordner → Stichwortverzeichnis und Offline-Check. Handschrift ist nicht durchsuchbar.'),
         li('Bilder','⋯ → „Bild oder Foto einfügen“ (am PC auch Strg + V). Mit dem Lasso antippen wählt ein eingefügtes Bild aus: verschieben, Größe ändern, löschen.'),
-        li('Text', 'auf die Seite tippen und schreiben (mit dem Pencil geht auch Kritzeln/Scribble).'),
+        li('Text', 'Textwerkzeug (T) wählen, dann mit Finger oder Pencil auf die Seite tippen und schreiben – mit dem Finger kommt die Tastatur, mit dem Pencil geht Kritzeln/Scribble. Vorhandenen Text antippen ändert ihn. Getippter Text ist durchsuchbar. Langer Text verlängert die Seite.'),
         li('Seitenmenü', '⋯ oben rechts an jeder Seite: Vorlage, Papier, duplizieren, verschieben, löschen.'),
         li('Am PC', 'Maus zeichnet, Strg + Mausrad zoomt, Strg + Z / Strg + Y.')),
     });
@@ -1766,6 +1797,7 @@ export async function openEditor(root, nbId, embed = null) {
       if (tap && [...e.touches].some(x => x.identifier === tap.id && Math.hypot(x.clientX - tap.x, x.clientY - tap.y) > 10)) tap = null;
     } else {
       const isTap = e.type === 'touchend' && tap && e.touches.length === 0 && t.identifier === tap.id && now - tap.t < 300;
+      if (isTap && S.tool === 'text') { tap = lastTap = null; textTap(t.clientX, t.clientY); return; } // Textfeld per Finger
       if (isTap && lastTap && now - lastTap.t < 400 && Math.hypot(t.clientX - lastTap.x, t.clientY - lastTap.y) < 50) {
         lastTap = null;
         toggleEraser();
@@ -2001,6 +2033,11 @@ export async function openEditor(root, nbId, embed = null) {
   if (!card && !embed) { // aus der Suche in der Bibliothek: gleich zur Fundstelle
     const f = takeFind();
     if (f?.nb === nb.id && f.q) openFind(f.q, f.page);
+    // neue, leere getippte Notiz: gleich ein Textfeld oben auf der ersten Seite
+    else if (nb.typed && E.pages.length === 1 && !E.pages[0].texts.length && !E.pages[0].strokes.length) {
+      const pv = E.pvs.get(E.pages[0].id);
+      if (pv) editText(pv, null, { x: 48, y: 80 });
+    }
   }
   if (card && !embed) { // frisch aus einem Ausschnitt angelegt: kurz sagen, was jetzt zu tun ist
     let side = null;
@@ -2010,6 +2047,7 @@ export async function openEditor(root, nbId, embed = null) {
 
   const destroy = async () => {
     finder?.close();
+    if (nb.typed && !embed && S.tool === 'text') S.tool = toolBefore;
     await closeCardPanel();
     if (!embed) saveView();
     for (const ta of editor.querySelectorAll('.text-edit')) ta.blur();

@@ -178,7 +178,8 @@ export async function offlineCheck(nbs, title) {
       const { docs } = await docsFor(pages);
       const withText = docs.filter(d => d && d.norm.trim()).length, n = pages.length;
       let search = withText === n ? 'durchsuchbar' : withText ? `${withText} von ${n} Seiten durchsuchbar` : 'nicht durchsuchbar (nur Handschrift/Bilder)';
-      if (!withText && (pages.some(x => x?.images?.length) || pages.some(x => x?.bg && !x.pdf))) search += ' – Tipp: das Original-PDF importieren, dann ist der Text durchsuchbar';
+      if (withText < n && nb.kind === 'pdf' && pages.some(x => x?.bg && !x.pdf && !x.ptext?.length)) search += ' – Abhilfe: ⋯ an der Notiz → „Durchsuchbar machen“ und das Original-PDF wählen';
+      else if (!withText && pages.some(x => x?.images?.length || x?.bg)) search += ' – Tipp: das Original-PDF importieren, dann ist der Text durchsuchbar';
       if (issues.length) problems++;
       row(!issues.length && withText > 0, nb.title,
         [pagesWord(n), issues.length ? issues.join(', ') : 'offline bereit' + (drawn ? ` (${drawn} Folienbilder ergänzt)` : ''), search].join(' · '));
@@ -194,6 +195,23 @@ export async function offlineCheck(nbs, title) {
     status.textContent = 'Prüfung abgebrochen: ' + err.message;
   }
   return p;
+}
+
+// Getippter Text: Lage der Zeichen aus dem angezeigten Textfeld (es bricht selbst um, das lässt sich nicht schätzen)
+function domRects(pageEl, I, c0, c1) {
+  if (!I[7]) return null;
+  const node = pageEl.querySelector(`.text-item[data-id="${CSS.escape(I[7])}"]`)?.firstChild;
+  if (!node || node.nodeType !== 3) return null;
+  const a = I[8] + c0, b = I[8] + c1 + 1;
+  if (b > node.length) return null;
+  const rg = document.createRange();
+  rg.setStart(node, a);
+  rg.setEnd(node, b);
+  const pr = pageEl.getBoundingClientRect();
+  if (!pr.width || !pr.height) return null;
+  const out = [...rg.getClientRects()].filter(r => r.width > 0).map(r => ({
+    x: (r.left - pr.left) / pr.width, y: (r.top - pr.top) / pr.height, w: r.width / pr.width, h: r.height / pr.height }));
+  return out.length ? out : null;
 }
 
 // ---------- Suchleiste in der offenen Notiz ----------
@@ -250,7 +268,8 @@ export function createFindBar(opts) {
       // jede Fundstelle einzeln (bei mehreren Wörtern: das erste Wort als Anker)
       for (const x of m.hits) {
         if (terms.length > 1 && x.k !== 0) continue;
-        const rects = hitRects(doc, x);
+        const el = opts.pageEl(pages[pi].id);
+        const rects = hitRects(doc, x, el && ((I, c0, c1) => domRects(el, I, c0, c1)));
         if (rects.length) hits.push({ pageId: pages[pi].id, pi, rects, y: rects[0].y });
       }
     });
