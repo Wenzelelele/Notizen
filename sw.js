@@ -1,7 +1,7 @@
 // Offline-Fähigkeit: App-Dateien kommen aus dem Cache. Jede veröffentlichte Version hat ihren eigenen Cache
 // (build-web.js setzt den Namen): Der neue Service Worker füllt ihn komplett, erst dann löst er den alten ab –
 // alte und neue Dateien werden so nie gemischt. Notizen selbst liegen ohnehin im Gerät.
-const CACHE = 'notizen-v1795711090126';
+const CACHE = 'notizen-v1795711556791';
 const SHELL = [
   './', 'index.html', 'manifest.json', 'icon.svg', 'icon-180.png', 'icon-512.png', 'css/style.css',
   'js/main.js', 'js/library.js', 'js/editor.js', 'js/ink.js', 'js/ui.js', 'js/store.js',

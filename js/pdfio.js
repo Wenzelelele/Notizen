@@ -294,26 +294,40 @@ export async function importPdf(file, { notebook, folderId = null, title, meta, 
   return { notebook: nb, pages: added };
 }
 
-// Text aus dem Original-PDF in eine vorhandene Notiz übernehmen – für Notizen, deren PDF nicht (mehr) da ist
-// (Importe vor dem 10.11.2026 haben nur Seitenbilder). Handschrift und Seiten bleiben unverändert: Jede Seite mit
-// Folienbild bekommt der Reihe nach den Text der nächsten PDF-Seite (page.ptext, klein, wird abgeglichen).
-// Ergebnis: { pages: Folienseiten der Notiz, pdfPages: Seiten im PDF, withText: Seiten mit Text }
+// Text aus dem Original-PDF in eine vorhandene Notiz übernehmen – für Folien ohne Text: ältere PDF-Importe (vor dem
+// 10.11.2026 nur Seitenbilder) und OneNote-Importe (Folien als Bilder auf einer langen Seite). Die Folien der Notiz
+// (Seitenbilder und fest liegende Bilder, von oben nach unten) bekommen der Reihe nach den Text der PDF-Seiten,
+// an die Lage der Folie angepasst – so markiert die Suche die Stelle auf der Folie. Handschrift bleibt unverändert;
+// der Text hängt an der Seite (page.ptext, klein, wird abgeglichen). Seiten mit eigenem Original-PDF bleiben, wie sie sind.
+// Ergebnis: { slides: Folien der Notiz, pdfPages: Seiten im PDF, withText: Folien mit Text }
 export async function attachPdfText(nb, file, onProgress) {
   const lib = await getPdfjs();
   const doc = await lib.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise;
   try {
-    const pages = (await store.getMany('pages', nb.pageIds || [])).filter(p => p && p.bg);
-    const n = Math.min(pages.length, doc.numPages);
+    const pages = (await store.getMany('pages', nb.pageIds || [])).filter(p => p && !p.pdf);
+    const slides = [];
+    for (const p of pages) {
+      const W = p.w || 794, H = p.h || 1123;
+      if (p.bg) slides.push({ p, x: 0, y: 0, w: 1, h: 1 });
+      const ims = (p.images || []).filter(im => !im.free).sort((a, b) => a.y - b.y || a.x - b.x);
+      for (const im of ims) slides.push({ p, x: im.x / W, y: im.y / H, w: im.w / W, h: im.h / H });
+    }
+    const n = Math.min(slides.length, doc.numPages);
+    const touched = new Set();
     let withText = 0;
+    for (const sl of slides.slice(0, n)) { if (!touched.has(sl.p)) { touched.add(sl.p); sl.p.ptext = []; } }
     for (let i = 0; i < n; i++) {
       onProgress?.(i + 1, n);
       const pg = await doc.getPage(i + 1);
       const items = await pageTextItems(pg);
       pg.cleanup();
-      if (items.length) { pages[i].ptext = items; withText++; } else delete pages[i].ptext;
+      const sl = slides[i];
+      if (items.length) withText++;
+      for (const it of items) sl.p.ptext.push([it[0], r4(sl.x + it[1] * sl.w), r4(sl.y + it[2] * sl.h), r4(it[3] * sl.w), r4(it[4] * sl.h), it[5]]);
     }
-    await store.batch(pages.slice(0, n).map(p => ({ name: 'pages', op: 'put', value: p })));
-    return { pages: pages.length, pdfPages: doc.numPages, withText };
+    for (const p of touched) if (!p.ptext.length) delete p.ptext;
+    await store.batch([...touched].map(p => ({ name: 'pages', op: 'put', value: p })));
+    return { slides: slides.length, pdfPages: doc.numPages, withText };
   } finally { doc.destroy(); }
 }
 

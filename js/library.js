@@ -485,7 +485,7 @@ export async function showLibrary(root) {
       { icon: 'download', label: 'Als PDF exportieren', onClick: () => exportNb(nb) },
       { icon: 'file', label: 'In Seiten aufteilen', onClick: async () => { if (await splitDialog([nb])) await reload(); } },
       { icon: 'copy', label: 'Mit anderer Notiz zusammenführen …', onClick: async () => { if (await mergeDialog(nb, notebooks)) await reload(); } },
-      nb.kind === 'pdf' && { icon: 'search', label: 'Durchsuchbar machen (Original-PDF wählen) …', onClick: () => pdfTextFor(nb) },
+      { icon: 'search', label: 'Durchsuchbar machen (Original-PDF wählen) …', onClick: () => pdfTextFor(nb) },
       (nb.kind === 'pdf' || nb.kind === 'onenote') && { icon: 'download', label: 'Speicher verkleinern', onClick: async () => { await shrinkWithProgress([nb]); await reload(); } },
       { sep: true },
       { icon: 'trash', label: 'Löschen', danger: true, onClick: async () => {
@@ -506,11 +506,12 @@ export async function showLibrary(root) {
         const r = await attachPdfText(nb, f, (i, n) => pr.set(`Seite ${i} von ${n}`, i / n));
         pr.close();
         await modal({
-          title: r.withText ? 'Notiz ist jetzt durchsuchbar' : 'Kein Text im PDF',
+          title: !r.slides ? 'Keine Folien in dieser Notiz' : r.withText ? 'Notiz ist jetzt durchsuchbar' : 'Kein Text im PDF',
           body: h('div', {},
-            h('p', {}, r.withText ? `Text von ${r.withText} Seiten übernommen. Deine Handschrift bleibt, wie sie ist.`
-              : 'Dieses PDF enthält keinen Text – vermutlich eingescannte Seiten. Durchsuchbar wird es so leider nicht.'),
-            r.pages !== r.pdfPages ? h('p', { class: 'muted small' }, `Achtung: Die Notiz hat ${r.pages} Folienseiten, das PDF ${r.pdfPages}. Die Seiten wurden der Reihe nach zugeordnet – ist es das richtige PDF?`) : null),
+            h('p', {}, !r.slides ? 'Diese Notiz hat keine Folien ohne Text (keine Seitenbilder, keine Folienbilder) – da gibt es nichts zu übernehmen.'
+              : r.withText ? `Text von ${r.withText} Folien übernommen. Deine Handschrift bleibt, wie sie ist.`
+                : 'Dieses PDF enthält keinen Text – vermutlich eingescannte Seiten. Durchsuchbar wird es so leider nicht.'),
+            r.slides && r.slides !== r.pdfPages ? h('p', { class: 'muted small' }, `Achtung: Die Notiz hat ${r.slides} Folien, das PDF ${r.pdfPages} Seiten. Zugeordnet wurde der Reihe nach – stimmt das PDF? Am besten eine Suche ausprobieren und prüfen, ob die markierte Stelle passt.`) : null),
         });
       } catch (err) {
         console.error(err);

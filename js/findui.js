@@ -183,7 +183,7 @@ export async function offlineCheck(nbs, title) {
         if (!x) continue;
         const slideText = x.pdf ? ptexts.get(x.pdf.key)?.[x.pdf.n - 1]?.length : x.ptext?.length;
         if (x.bg && !slideText) blind++;
-        blind += (x.images || []).filter(im => !im.free).length;
+        if (!x.ptext?.length) blind += (x.images || []).filter(im => !im.free).length; // Folienbilder (OneNote) ohne übernommenen Text
       }
       const { docs } = await docsFor(pages);
       const withText = docs.filter(d => d && d.norm.trim()).length, n = pages.length;
@@ -192,9 +192,7 @@ export async function offlineCheck(nbs, title) {
       else {
         search = `${blind} ${blind === 1 ? 'Folie ist ein Bild' : 'Folien sind Bilder'} ohne Text – darin findet die Suche nichts`
           + (withText ? ' (nur getippter Text/Überschrift ist durchsuchbar)' : '');
-        search += nb.kind === 'pdf' && pages.some(x => x?.bg && !x.pdf)
-          ? '. Abhilfe: ⋯ an der Notiz → „Durchsuchbar machen“ und das Original-PDF wählen'
-          : '. Abhilfe: das Original-PDF importieren';
+        search += '. Abhilfe: ⋯ an der Notiz → „Durchsuchbar machen“ und das Original-PDF wählen (Handschrift bleibt)';
         blindNotes++;
       }
       if (issues.length) problems++;
