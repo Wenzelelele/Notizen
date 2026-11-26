@@ -134,7 +134,7 @@ export async function offlineCheck(nbs, title) {
   const p = modal({ title: 'Offline-Check' + (title ? ' – ' + title : ''), body, actions: [{ label: 'Fertig', value: true, primary: true }] });
   const row = (ok, name, text) => rows.append(h('div', { class: 'oc-row' + (ok ? ' ok' : ' warn') },
     h('span', { class: 'oc-ico' }, ok ? '✓' : '!'), h('div', { class: 'grow' }, h('b', {}, name), h('div', { class: 'muted small' }, text))));
-  let problems = 0;
+  let problems = 0, blindNotes = 0;
   try {
     // 1) die App selbst
     const installed = location.protocol === 'https:' && 'serviceWorker' in navigator;
@@ -174,21 +174,39 @@ export async function offlineCheck(nbs, title) {
       }
       if (noBg) issues.push(`${noBg} Folienbilder fehlen`);
       if (noImg) issues.push(`${noImg} Bilder fehlen (Abgleich abwarten)`);
-      for (const k of keys) await pdfText(k).catch(() => null);
+      const ptexts = new Map();
+      for (const k of keys) ptexts.set(k, await pdfText(k).catch(() => null));
+      // Folien ohne Text: PDF-Seiten ohne lesbaren Text und Folienbilder (OneNote-Importe: Folien als Bilder).
+      // Eine Überschrift oder ein Datum daneben macht die Folien selbst nicht durchsuchbar.
+      let blind = 0;
+      for (const x of pages) {
+        if (!x) continue;
+        const slideText = x.pdf ? ptexts.get(x.pdf.key)?.[x.pdf.n - 1]?.length : x.ptext?.length;
+        if (x.bg && !slideText) blind++;
+        blind += (x.images || []).filter(im => !im.free).length;
+      }
       const { docs } = await docsFor(pages);
       const withText = docs.filter(d => d && d.norm.trim()).length, n = pages.length;
-      let search = withText === n ? 'durchsuchbar' : withText ? `${withText} von ${n} Seiten durchsuchbar` : 'nicht durchsuchbar (nur Handschrift/Bilder)';
-      if (withText < n && nb.kind === 'pdf' && pages.some(x => x?.bg && !x.pdf && !x.ptext?.length)) search += ' – Abhilfe: ⋯ an der Notiz → „Durchsuchbar machen“ und das Original-PDF wählen';
-      else if (!withText && pages.some(x => x?.images?.length || x?.bg)) search += ' – Tipp: das Original-PDF importieren, dann ist der Text durchsuchbar';
+      let search;
+      if (!blind) search = withText ? 'durchsuchbar' : 'nichts durchsuchbar (nur Handschrift)';
+      else {
+        search = `${blind} ${blind === 1 ? 'Folie ist ein Bild' : 'Folien sind Bilder'} ohne Text – darin findet die Suche nichts`
+          + (withText ? ' (nur getippter Text/Überschrift ist durchsuchbar)' : '');
+        search += nb.kind === 'pdf' && pages.some(x => x?.bg && !x.pdf)
+          ? '. Abhilfe: ⋯ an der Notiz → „Durchsuchbar machen“ und das Original-PDF wählen'
+          : '. Abhilfe: das Original-PDF importieren';
+        blindNotes++;
+      }
       if (issues.length) problems++;
-      row(!issues.length && withText > 0, nb.title,
+      row(!issues.length && !blind && withText > 0, nb.title,
         [pagesWord(n), issues.length ? issues.join(', ') : 'offline bereit' + (drawn ? ` (${drawn} Folienbilder ergänzt)` : ''), search].join(' · '));
     }
     status.textContent = '';
     bar.parentElement.remove();
-    head.replaceChildren(h('p', { class: 'oc-sum' + (problems ? ' warn' : ' ok') }, problems
+    head.replaceChildren(h('p', { class: 'oc-sum' + (problems || blindNotes ? ' warn' : ' ok') }, problems
       ? 'Noch nicht alles bereit – siehe unten. Mit Internet beheben und erneut prüfen.'
-      : 'Alles bereit für den Flugmodus.'),
+      : blindNotes ? `Offline ist alles da – aber ${blindNotes === 1 ? '1 Skript ist' : blindNotes + ' Skripte sind'} nicht (ganz) durchsuchbar, siehe unten.`
+        : 'Alles bereit für den Flugmodus und durchsuchbar.'),
     h('p', { class: 'muted small' }, 'Tipp: Vor der Klausur einmal im Flugmodus öffnen und eine Suche ausprobieren.'));
   } catch (err) {
     console.error(err);
